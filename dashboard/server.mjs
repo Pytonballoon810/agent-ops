@@ -1,18 +1,24 @@
-// Serves Boost's own dashboard with a model-routing panel added under "Tokens Saved".
+// Serves Boost's own dashboard with the model-routing and jev-meter cards added under "Tokens Saved".
 // Boost's binary and its page are untouched: this proxies every request to the running
-// `boost ui` server and injects one <script> into the HTML, so a Boost update cannot erase it.
+// `boost ui` server and injects scripts into the HTML, so a Boost update cannot erase them.
+// It also watches for `boost ui` starting and opens this page when it does.
 //
 //   node server.mjs            http://127.0.0.1:56300/
-//   ROUTING_PORT=... BOOST_URL=http://127.0.0.1:NNNNN node server.mjs
+//   ROUTING_PORT=... BOOST_URL=http://127.0.0.1:NNNNN JEV_METER_PORT=... node server.mjs
+//   ROUTING_NO_OPEN=1          do not open a browser tab when Boost starts
 
 import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, execFile } from 'node:child_process'
 import { openDb, ingest } from './ingest.mjs'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
 const PORT = Number(process.env.ROUTING_PORT || 56300)
+const JEV_URL = `http://127.0.0.1:${Number(process.env.JEV_METER_PORT || 7431)}`
+// The jev card's script is read from jev-meter's folder, not fetched from its server, so the card
+// can still say "jev-meter is not running" when that server is down.
+const JEV_DIR = process.env.JEV_METER_DIR || path.join(HERE, '..', '..', 'jev-meter')
 const db = openDb()
 let lastIngest = 0
 
@@ -127,21 +133,75 @@ async function proxy(req, res) {
   const type = up.headers.get('content-type') || ''
   let buf = Buffer.from(await up.arrayBuffer())
   if (type.includes('text/html')) {
-    const html = buf.toString('utf8')
-    const tag = '<script type="module" src="/__routing/panel.js"></script>'
-    buf = Buffer.from(html.includes('</body>') ? html.replace('</body>', tag + '</body>') : html + tag)
+    let html = buf.toString('utf8')
+    // period.js first and classic, so it wraps fetch before Boost's own modules make their first request.
+    const head = '<script src="/__routing/period.js"></script>'
+    html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, m => m + head) : head + html
+    const tags = '<script type="module" src="/__routing/panel.js"></script><script type="module" src="/__jev/boost-panel.js"></script>'
+    buf = Buffer.from(html.includes('</body>') ? html.replace('</body>', tags + '</body>') : html + tags)
   }
   res.writeHead(up.status, out)
   res.end(buf)
 }
 
+// jev-meter owns its card and its data; this only forwards /__jev/<path> to it. Its failure must
+// never reach Boost's page, so any error becomes a JSON 502 the card can show.
+async function jev(req, res, rest) {
+  try {
+    const up = await fetch(JEV_URL + rest, { signal: AbortSignal.timeout(15_000) })
+    res.writeHead(up.status, { 'content-type': up.headers.get('content-type') || 'application/octet-stream', 'cache-control': 'no-store' })
+    res.end(Buffer.from(await up.arrayBuffer()))
+  } catch (e) {
+    res.writeHead(502, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    res.end(JSON.stringify({ error: `jev-meter is not answering on ${JEV_URL}`, down: true }))
+  }
+}
+
+// Start with Boost: `boost ui` is started by hand and takes a new port each time. Poll for it, and
+// when a Boost dashboard appears on a port not seen before, open this page once. Whatever is
+// already running when this server starts (at logon, or a restart) is adopted without opening.
+let watchedPort = undefined
+// The task runs hidden, so stdout goes nowhere; Boost comings and goings are kept in server.log.
+function log(line) {
+  const stamped = `${new Date().toISOString()}  ${line}\n`
+  process.stdout.write(stamped)
+  try {
+    const file = path.join(HERE, 'server.log')
+    if (fs.existsSync(file) && fs.statSync(file).size > 256 * 1024) fs.renameSync(file, file + '.1')
+    fs.appendFileSync(file, stamped)
+  } catch {}
+}
+async function watchBoost() {
+  const url = process.env.BOOST_URL ? null : await discoverBoost()
+  const port = url ? new URL(url).port : null
+  if (port !== watchedPort) {
+    if (!process.env.BOOST_URL) boostUrl = url
+    if (port && watchedPort !== undefined && !process.env.ROUTING_NO_OPEN) {
+      execFile('rundll32', ['url.dll,FileProtocolHandler', `http://127.0.0.1:${PORT}/`], () => {})
+      log(`boost ui appeared on ${port}; opened the combined page`)
+    } else {
+      log(port ? `adopted boost ui on ${port}` : 'boost ui is not running')
+    }
+    watchedPort = port
+  }
+}
+
 http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://x')
-    if (u.pathname === '/__routing/panel.js') {
+    if (u.pathname === '/__routing/panel.js' || u.pathname === '/__routing/period.js') {
       res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
-      return res.end(fs.readFileSync(path.join(HERE, 'panel.js')))
+      return res.end(fs.readFileSync(path.join(HERE, path.basename(u.pathname))))
     }
+    if (u.pathname === '/__jev/boost-panel.js') {
+      let js
+      try { js = fs.readFileSync(path.join(JEV_DIR, 'public', 'boost-panel.js')) } catch {
+        js = `console.warn('jev-meter card: boost-panel.js not found under ${JEV_DIR.replace(/\\/g, '/')}')`
+      }
+      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
+      return res.end(js)
+    }
+    if (u.pathname.startsWith('/__jev/')) return jev(req, res, u.pathname.slice('/__jev'.length) + u.search)
     if (u.pathname === '/__routing/api/summary') {
       const days = Math.max(0, Number(u.searchParams.get('days') ?? 30) || 0)
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
@@ -152,7 +212,11 @@ http.createServer(async (req, res) => {
     res.writeHead(500, { 'content-type': 'text/plain' })
     res.end(String(e && e.stack || e))
   }
+}).on('error', e => {
+  console.error(e.code === 'EADDRINUSE' ? `port ${PORT} is already in use — another copy is probably running` : e.message)
+  process.exit(1)
 }).listen(PORT, '127.0.0.1', async () => {
-  boostUrl ||= await discoverBoost()
+  await watchBoost()
   console.log(`model-routing dashboard on http://127.0.0.1:${PORT}/  (Boost at ${boostUrl || 'not found yet'})`)
+  setInterval(() => watchBoost().catch(() => {}), 5_000)
 })

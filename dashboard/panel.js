@@ -1,5 +1,5 @@
 // The model-routing card, injected into Boost's dashboard under "Tokens Saved".
-// It follows Boost's own period selector by watching the `days=` Boost's page asks its API for.
+// It follows Boost's own period selector through period.js (window.__boostPeriod, `boost-period`).
 
 const ID = 'model-routing'
 const TIERS = [
@@ -8,8 +8,8 @@ const TIERS = [
   { key: 'haiku', name: 'Haiku', color: '#56d4dd' },
   { key: 'fable', name: 'Fable', color: '#d2a8ff' },
 ]
-let days = 30
-let data = null, boostTotals = null
+let days = window.__boostPeriod?.days ?? 30
+let data = null, boostTotals = null, loading = true, failure = null
 
 const css = `
 #${ID} { --mr-dim: rgba(255,255,255,.55); --mr-faint: rgba(255,255,255,.08); --mr-accent: #f0883e; color: #fff; }
@@ -35,6 +35,12 @@ const css = `
 #${ID} .mr-chart:hover .mr-col:not(.mr-on) { opacity:.4; }
 #${ID} .mr-split:hover .mr-seg:not(.mr-on) { opacity:.45; }
 #${ID} .mr-seg { transition: opacity .12s ease-out; }
+/* Loading skeleton, as Boost's own panes do it: the pane pulses (Tailwind's animate-pulse) with bars where content goes. */
+@keyframes ${ID}-pulse { 50% { opacity:.5 } }
+#${ID}[aria-busy="true"] { animation: ${ID}-pulse 2s cubic-bezier(.4,0,.6,1) infinite; }
+@media (prefers-reduced-motion: reduce) { #${ID}[aria-busy="true"] { animation:none; } }
+#${ID} code { font-size:11px; background:var(--mr-faint); padding:1px 5px; border-radius:4px; }
+#${ID} .mr-sk { background: rgba(255,255,255,.1); border-radius:4px; max-width:100%; }
 `
 
 const usd = v => v >= 100 ? `$${Math.round(v).toLocaleString()}` : `$${(v || 0).toFixed(2)}`
@@ -158,10 +164,40 @@ function bindHover(el) {
   }
 }
 
+const bar = (w, h, extra = '') => `<div class="mr-sk" style="width:${w};height:${h}px;${extra}"></div>`
+const rows = n => Array.from({ length: n }, () => bar('100%', 14, 'margin-top:9px')).join('')
+function skeleton() {
+  return `
+    <div class="mr-head">
+      <div>${bar('112px', 12)}${bar('256px', 40, 'margin-top:16px')}</div>
+      <div>${bar('240px', 12)}${bar('90px', 12, 'margin:6px 0 0 auto')}</div>
+    </div>
+    ${bar('100%', 140, 'margin-top:36px;border-radius:6px')}
+    ${bar('280px', 10, 'margin-top:14px')}
+    <div class="mr-grid">
+      <div>${bar('112px', 11)}${bar('100%', 10, 'margin-top:14px;border-radius:5px')}${bar('160px', 11, 'margin-top:30px')}${rows(7)}</div>
+      <div>${bar('170px', 11)}${rows(5)}${bar('150px', 11, 'margin-top:30px')}${rows(4)}</div>
+    </div>`
+}
+
 function render() {
   hideTip()
   const el = ensureMounted()
-  if (!el || !data) return
+  if (!el) return
+  if (failure && !data) {
+    el.removeAttribute('aria-busy')
+    el.innerHTML = `<h2 class="report-section-heading" style="color:var(--mr-accent)">Model routing</h2>
+      <p class="mr-sub" style="margin-top:12px">The routing summary did not load: ${esc(failure)}</p>`
+    return
+  }
+  if (loading || !data) {
+    el.setAttribute('aria-busy', 'true')
+    el.setAttribute('aria-label', 'Loading model routing')
+    el.innerHTML = skeleton()
+    return
+  }
+  el.removeAttribute('aria-busy')
+  el.removeAttribute('aria-label')
   const T = data.totals
   const saved = T.baseline - T.cost
   const spend = TIERS.filter(t => T.byTier[t.key]?.agents)
@@ -170,6 +206,12 @@ function render() {
 
   const roles = data.roles.slice(0, 14).map(r => `<tr><td>${esc(r.role)}${r.lens ? `<span class="mr-sub">:${esc(r.lens)}</span>` : ''}</td><td>${pill(r.tier)}</td>
     <td class="n">${r.agents}</td><td class="n">${usd(r.cost)}</td><td class="n">${usd(r.cost / r.agents)}</td></tr>`).join('')
+
+  // Every labelled agent on Opus means no routed script ran in this period — say so, or the table reads as a bug.
+  const routed = data.roles.some(r => r.tier !== 'opus' && r.role !== '(no label)')
+  const onlyOpus = data.roles.length && !routed
+    ? `<p class="mr-sub" style="margin:-4px 0 8px">Every labelled agent in this period ran on Opus: no workflow using the routing table has run yet. Scripts pick models only if they use <code>route()</code> from agent-routing/templates/route.js.</p>`
+    : ''
 
   const quality = data.quality.map(q => {
     const judged = q.fixed + q.rejected
@@ -191,7 +233,7 @@ function render() {
         <h2 class="report-section-heading" style="color:var(--mr-accent)">Model routing</h2>
         <div class="mr-big" style="margin-top:12px">${saved >= 0 ? usd(saved) : '−' + usd(-saved)}<small>${saved >= 0 ? 'saved by routing off Opus' : 'more than keeping it on Opus'}</small></div>
       </div>
-      <div class="mr-sub" style="text-align:right">${T.agents} subagents · ${usd(T.cost)} API-equivalent spend${boost}<br>${data.days ? `past ${data.days} days` : 'all time'}${T.unpriced ? ` · ${T.unpriced} unpriced` : ''}</div>
+      <div class="mr-sub" style="text-align:right">${T.agents} subagents · ${usd(T.cost)} API-equivalent spend${boost}<br>${data.days === 1 ? 'past 24 hours' : data.days ? `past ${data.days} days` : 'all time'}${T.unpriced ? ` · ${T.unpriced} unpriced` : ''}</div>
     </div>
     <div style="margin-top:18px">${chart(data.timeline)}</div>
     <div class="mr-legend">${TIERS.map(t => `<span><i style="background:${t.color}"></i>${t.name}</span>`).join('')}<span><i style="background:none;border-top:1px dashed #fff;height:0;border-radius:0"></i>same tokens at Opus 5.5</span></div>
@@ -200,7 +242,7 @@ function render() {
         <h3>Spend by model</h3>
         <div class="mr-split">${split}</div>
         <div class="mr-legend">${legend}</div>
-        <h3 style="margin-top:20px">Role → model</h3>
+        <h3 style="margin-top:20px">Role → model</h3>${onlyOpus}
         <div class="mr-scroll"><table><thead><tr><th>Role</th><th>Model</th><th class="n">Agents</th><th class="n">Spend</th><th class="n">Avg</th></tr></thead><tbody>${roles}</tbody></table></div>
       </div>
       <div>
@@ -219,47 +261,59 @@ function render() {
   bindHover(el)
 }
 
+// Boost's Tokens Saved pane, loaded or still its own skeleton (which has no text, only an aria-label).
+function tokensPane() {
+  const main = document.querySelector('main')
+  return main && [...main.querySelectorAll(':scope > section')].find(s => /Tokens Saved/i.test(s.textContent || '') || /tokens saved/i.test(s.getAttribute('aria-label') || ''))
+}
+// Look like Boost's pane, but never inherit its skeleton's pulse: the card pulses on its own aria-busy.
+const paneClass = anchor => anchor.className.split(/\s+/).filter(c => c && c !== 'animate-pulse').join(' ')
+
 function ensureMounted() {
   let el = document.getElementById(ID)
-  if (el && el.isConnected) return el
-  const main = document.querySelector('main')
-  const anchor = main && [...main.querySelectorAll(':scope > section')].find(s => /Tokens Saved/i.test(s.textContent || ''))
+  const anchor = tokensPane()
+  if (el && el.isConnected) {
+    if (anchor) el.className = paneClass(anchor)
+    return el
+  }
   if (!anchor) return null
   if (!document.getElementById(ID + '-css')) {
     const st = document.createElement('style'); st.id = ID + '-css'; st.textContent = css; document.head.appendChild(st)
   }
   el = document.createElement('section')
   el.id = ID
-  el.className = anchor.className
+  el.className = paneClass(anchor)
   anchor.after(el)
   return el
 }
 
-async function load() {
+// `skeleton` is for a first load and a period change, as Boost does; the minute refresh swaps in quietly.
+async function load(skeleton = false) {
+  const asked = days
+  if (skeleton) { loading = true; render() }
   try {
     const [s, b] = await Promise.all([
-      fetch(`/__routing/api/summary?days=${days}`).then(r => r.json()),
-      fetch(`/api/totals?days=${days}`).then(r => r.json()).catch(() => null),
+      fetch(`/__routing/api/summary?days=${days}`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() }),
+      fetch(`/api/totals${days ? `?days=${days}` : ''}`).then(r => r.json()).catch(() => null),
     ])
-    data = s; boostTotals = b?.totals || null
-    render()
-  } catch (e) { console.warn('model-routing:', e) }
+    if (asked !== days) return   // the period changed while this was in flight
+    data = s; boostTotals = b?.totals || null; failure = null
+  } catch (e) {
+    if (asked !== days) return
+    console.warn('model-routing:', e)
+    failure = String(e.message || e)
+    if (skeleton) data = null
+  }
+  loading = false
+  render()
 }
 
-// Follow Boost's period selector: it refetches its own API with the new days= value.
-const origFetch = window.fetch
-window.fetch = function (input, init) {
-  try {
-    const url = typeof input === 'string' ? input : input.url
-    const m = /\/api\/savings-timeline\?(?:.*&)?days=(\d+)/.exec(url)
-    if (m && Number(m[1]) !== days) { days = Number(m[1]); setTimeout(load, 0) }
-  } catch {}
-  return origFetch.apply(this, arguments)
-}
+window.addEventListener('boost-period', e => { days = e.detail.days; load(true) })
 
-// React may re-render the page and drop a node it does not own; put it back when that happens.
-new MutationObserver(() => { if (data && !document.getElementById(ID)) render() })
+// Mount as soon as Boost's Tokens Saved pane exists (showing the skeleton until data arrives), and put the
+// card back when React re-renders the page and drops a node it does not own.
+new MutationObserver(() => { if (!document.getElementById(ID)) render() })
   .observe(document.body, { childList: true, subtree: true })
 
-load()
-setInterval(load, 60_000)
+load(true)
+setInterval(() => load(false), 60_000)

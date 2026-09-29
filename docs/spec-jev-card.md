@@ -1,7 +1,11 @@
 # Spec: jev-meter card in the Boost dashboard, following Boost's period, starting with Boost
 
-Status: draft, 2026-09-29. Nothing implemented yet. Decisions taken on 2026-09-29: the card follows
-Boost's period selector, and the combined page starts with Boost.
+Status: built 2026-09-29. Decisions taken that day: the card follows Boost's period selector, and
+the combined page starts with Boost. Deviations from the text below: the jev card's script is read
+from jev-meter's folder on disk rather than fetched from its server (otherwise the "not running"
+state could never show); and both cards gained Boost-style loading skeletons. Part 3, point 3 is
+still open: the auto-open was verified from the server's log, but whether `boost ui` also opens a tab
+of its own could not be seen from here (`boost ui` has no flag to stop it if it does).
 
 ## Goal
 
