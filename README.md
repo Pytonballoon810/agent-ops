@@ -31,8 +31,12 @@ cannot erase the cards. One pane sits above Boost's *Tokens Saved*:
 
 Two cards sit under it:
 
-- **Model routing** (`panel.js`, data from `ingest.mjs`) — which model every subagent ran on, what it
-  cost, and how its reviews held up. `ingest.mjs` reads `~/.claude/projects/*/*/subagents/**` into
+- **Model routing** (`panel.js`, data from `ingest.mjs`) — which model and reasoning effort every
+  subagent ran on, what it cost, and how its reviews held up. The headline adds two savings: model
+  (tokens at Opus 5.5 price minus actual cost) and effort, estimated (an agent below the session's
+  default effort, `xhigh`, against the average output tokens of the same role at `xhigh`, priced at its
+  model's output rate; needs 3+ reference agents). Effort is read from the transcripts, where every
+  assistant line records it. `ingest.mjs` reads `~/.claude/projects/*/*/subagents/**` into
   `dashboard/routing.db` (SQLite), incrementally; `--rebuild` starts over. Prices come from Boost's
   `litellm-prices.json`.
 - **Skill router** (`jev-panel.js`, data from `jev.mjs`) — what the jev-skill-suggestion mod does:

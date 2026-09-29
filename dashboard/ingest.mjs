@@ -119,8 +119,28 @@ export function openDb(file = DB_PATH) {
     );
     CREATE INDEX IF NOT EXISTS usage_hour ON usage(hour);
   `)
+  // Effort (low … max) is recorded on every assistant line of a transcript. Databases from before it
+  // was tracked gain the column and are re-read: agents by forgetting which files were seen, usage by
+  // dropping its tables (it is keyed by effort, and rebuilds in seconds).
+  if (!db.prepare(`PRAGMA table_info(agents)`).all().some(c => c.name === 'effort')) {
+    db.exec(`ALTER TABLE agents ADD COLUMN effort TEXT; DELETE FROM files;`)
+  }
+  if (!db.prepare(`PRAGMA table_info(usage)`).all().some(c => c.name === 'effort')) {
+    db.exec(`DROP TABLE usage; DROP TABLE usage_files;
+      CREATE TABLE usage_files (path TEXT PRIMARY KEY, offset INTEGER, last_msg TEXT);
+      CREATE TABLE usage (
+        path TEXT, hour TEXT, model TEXT, kind TEXT, effort TEXT, messages INTEGER,
+        input INTEGER, output INTEGER, cache_read INTEGER, cache_write_5m INTEGER, cache_write_1h INTEGER,
+        cost_usd REAL, unpriced INTEGER,
+        PRIMARY KEY (path, hour, model, kind, effort)
+      );
+      CREATE INDEX usage_hour ON usage(hour);`)
+  }
   return db
 }
+
+// low < medium < high < xhigh < max; an agent's effort is the one most of its messages ran at.
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
 // Every transcript with its kind: <project>/<session>.jsonl is a chat; under <session>/subagents/,
 // workflows/wf_*/ holds workflow agents and anything else is an Agent-tool subagent.
@@ -208,7 +228,7 @@ function ingestUsageFile(db, file, kind, size, mtimeMs, st) {
         if (pending) commit(pending)
         // Older versions kept Agent-tool subagents inside the chat's own file, marked as a sidechain.
         const k = kind === 'chat' && o.isSidechain ? 'subagent' : kind
-        pending = { id, x, model: m.model, key: `${o.timestamp.slice(0, 13)}\u0000${m.model}\u0000${k}`, start: lineStart }
+        pending = { id, x, model: m.model, key: `${o.timestamp.slice(0, 13)}\u0000${m.model}\u0000${k}\u0000${o.effort || ''}`, start: lineStart }
       }
     }
   } finally { fs.closeSync(fd) }
@@ -217,8 +237,8 @@ function ingestUsageFile(db, file, kind, size, mtimeMs, st) {
     else offset = pending.start
   }
   for (const [key, a] of acc) {
-    const [hour, model, k] = key.split('\u0000')
-    st.add.run(file, hour, model, k, a.messages, a.input, a.output, a.cache_read, a.cache_write_5m, a.cache_write_1h, a.cost, a.unpriced)
+    const [hour, model, k, effort] = key.split('\u0000')
+    st.add.run(file, hour, model, k, effort, a.messages, a.input, a.output, a.cache_read, a.cache_write_5m, a.cache_write_1h, a.cost, a.unpriced)
   }
   st.mark.run(file, offset, last)
   return true
@@ -230,8 +250,8 @@ export function ingestUsage(db = openDb(), { rebuild = false } = {}) {
     get: db.prepare(`SELECT offset, last_msg FROM usage_files WHERE path = ?`),
     del: db.prepare(`DELETE FROM usage WHERE path = ?`),
     mark: db.prepare(`INSERT OR REPLACE INTO usage_files VALUES (?,?,?)`),
-    add: db.prepare(`INSERT INTO usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT (path, hour, model, kind) DO UPDATE SET messages = messages + excluded.messages,
+    add: db.prepare(`INSERT INTO usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT (path, hour, model, kind, effort) DO UPDATE SET messages = messages + excluded.messages,
         input = input + excluded.input, output = output + excluded.output, cache_read = cache_read + excluded.cache_read,
         cache_write_5m = cache_write_5m + excluded.cache_write_5m, cache_write_1h = cache_write_1h + excluded.cache_write_1h,
         cost_usd = cost_usd + excluded.cost_usd, unpriced = unpriced + excluded.unpriced`),
@@ -299,8 +319,11 @@ function readAgent(file) {
     const m = o.message
     if (!m || m.role !== 'assistant' || !m.usage) continue
     // One API message is written as several lines (one per content block) carrying the same usage.
-    byMsg.set(m.id || o.uuid, { model: m.model, u: m.usage })
+    byMsg.set(m.id || o.uuid, { model: m.model, u: m.usage, effort: o.effort || null })
   }
+  const efforts = new Map()
+  for (const { effort } of byMsg.values()) if (effort) efforts.set(effort, (efforts.get(effort) || 0) + 1)
+  const effort = [...efforts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null
   const tot = { input: 0, output: 0, cache_read: 0, cache_write_5m: 0, cache_write_1h: 0 }
   const models = new Map()
   let cost = 0, baseline = 0, priced = true
@@ -319,7 +342,7 @@ function readAgent(file) {
     baseline += tier(model) === 'opus' ? (c ?? 0) : (costOf(x, BASELINE_MODEL) ?? 0)
   }
   const model = [...models.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null
-  return { ...tot, model, messages: byMsg.size, started: first, ended: last, cost: priced ? cost : null, baseline }
+  return { ...tot, model, effort, messages: byMsg.size, started: first, ended: last, cost: priced ? cost : null, baseline }
 }
 
 function readJournal(db, file, runId, labels) {
@@ -372,7 +395,7 @@ export function ingest(db = openDb(), { rebuild = false } = {}) {
   if (rebuild) db.exec(`DELETE FROM files; DELETE FROM agents; DELETE FROM reviews; DELETE FROM fix_outcomes;`)
   const seen = db.prepare(`SELECT mtime, size FROM files WHERE path = ?`)
   const mark = db.prepare(`INSERT OR REPLACE INTO files VALUES (?,?,?)`)
-  const upA = db.prepare(`INSERT OR REPLACE INTO agents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+  const upA = db.prepare(`INSERT OR REPLACE INTO agents VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
   const labelOf = db.prepare(`SELECT agent_id, label FROM agents WHERE run_id = ?`)
   let agents = 0, journals = 0
   const pendingJournals = []
@@ -396,7 +419,7 @@ export function ingest(db = openDb(), { rebuild = false } = {}) {
       if (!a.messages || !a.model) { mark.run(file, st.mtimeMs, st.size); continue }
       upA.run(agentId, project, session, runId, label, chunk, role, lens, meta.agentType || null, a.model, tier(a.model),
         a.started, a.ended, a.messages, a.input, a.output, a.cache_read, a.cache_write_5m, a.cache_write_1h, a.cost, a.baseline,
-        priceFor(a.model)?.as ?? null)
+        priceFor(a.model)?.as ?? null, a.effort)
       mark.run(file, st.mtimeMs, st.size)
       agents++
     }

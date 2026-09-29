@@ -81,6 +81,16 @@ function bars() {
     </div>`
 }
 
+// Share of the shown metric per reasoning effort, low → max, e.g. "xhigh 78% · high 15% · max 6%".
+const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max']
+function effortShares(by) {
+  const rows = Object.entries(by || {}).filter(([, v]) => v[metric] > 0)
+    .sort((a, b) => EFFORT_ORDER.indexOf(a[0]) - EFFORT_ORDER.indexOf(b[0]))
+  const total = rows.reduce((s, [, v]) => s + v[metric], 0)
+  if (!total) return '—'
+  return rows.map(([k, v]) => { const p = (v[metric] / total) * 100; return `${esc(k)} ${p >= 1 ? Math.round(p) : '<1'}%` }).join(' · ')
+}
+
 function legendItem(key, name, title, style, value) {
   const off = hidden.has(key)
   return `<li><button type="button" data-toggle="${key}" title="${esc(title)}" aria-pressed="${off}" class="inline-flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition hover:bg-white/[0.05]" style="opacity:${off ? .4 : 1};">
@@ -133,7 +143,8 @@ function render() {
             <span class="font-sans text-xl font-normal text-white">${metric === 'cost' ? 'API-equivalent spend' : 'tokens processed'}</span></p></div>
         </div>
         <div class="pb-1 text-xs tabular-nums text-white/70">${metric === 'cost' ? `${kfmt(T.tokens)} tokens` : usd(T.cost)} · ${T.messages.toLocaleString('en-US')} model calls<br>
-          chats ${pct('chat')}% · chat subagents ${pct('subagent')}% · workflows ${pct('workflow')}%</div>
+          chats ${pct('chat')}% · chat subagents ${pct('subagent')}% · workflows ${pct('workflow')}%<br>
+          effort ${effortShares(T.byEffort)}</div>
       </div>
       <div class="flex flex-col items-end gap-1.5">
         <div class="flex gap-1" role="group" aria-label="Show">${tab('cost', 'Cost')}${tab('tokens', 'Tokens')}</div>
@@ -170,6 +181,8 @@ function barTip(i) {
   const tot = lines.reduce((s, x) => s + x.c.cost, 0), tok = lines.reduce((s, x) => s + x.c.tokens, 0), calls = lines.reduce((s, x) => s + x.c.messages, 0)
   rows += row('total', `${metric === 'cost' ? usd(tot) : kfmt(tok)} <span class="text-white/50">${metric === 'cost' ? kfmt(tok) : usd(tot)}</span>`, { cls: RULE + 'text-white' })
   rows += row('model calls', calls.toLocaleString('en-US'), { cls: 'text-white/70' })
+  // Effort covers every model and kind that day, so it is left out when a series is hidden.
+  if (b.effort && !hidden.size) rows += row('effort', effortShares(b.effort), { cls: 'text-white/70' })
   return `<div><p class="mb-1.5 font-semibold text-white">${esc(label(b.key))}</p>${lines.length ? dl(rows) : '<p class="text-[11px] text-white/60">Nothing this ' + (data.hourly ? 'hour' : 'day') + '.</p>'}</div>`
 }
 function tipEl() {

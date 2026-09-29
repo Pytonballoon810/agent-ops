@@ -48,6 +48,15 @@ const usd = v => v >= 100 ? `$${Math.round(v).toLocaleString()}` : `$${(v || 0).
 const kfmt = v => v >= 1e9 ? `${(v / 1e9).toFixed(1)}B` : v >= 1e6 ? `${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}K` : String(v)
 const tierOf = k => TIERS.find(t => t.key === k) || { key: k, name: k, color: '#888' }
 const pill = k => { const t = tierOf(k); return `<span class="mr-pill" style="background:${t.color}22;color:${t.color}">${t.name}</span>` }
+// Reasoning effort, low → max, cool to warm.
+const EFFORTS = [
+  { key: 'low', color: '#7ee787' }, { key: 'medium', color: '#a5d6ff' }, { key: 'high', color: '#d2a8ff' },
+  { key: 'xhigh', color: '#ffa657' }, { key: 'max', color: '#ff7b72' },
+]
+const effortOf = k => EFFORTS.find(e => e.key === k) || { key: k || '?', color: '#8b949e' }
+const epill = k => { const e = effortOf(k); return `<span class="mr-pill" style="border:1px solid ${e.color}66;color:${e.color}">${esc(e.key)}</span>` }
+// The chart's effort segment: Boost's hatch, since it is an estimate rather than a priced difference.
+const EFFORT_SEG = { key: 'effort', name: 'Effort (est.)', color: '#8b949e' }
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
 
 // Impact per day around a centred zero: each routed model's saving against the same tokens at Opus 5.5
@@ -57,7 +66,8 @@ function chart(timeline) {
   const W = 640, H = 150
   if (!timeline.length) return `<div class="mr-sub">No subagent runs in this period.</div>`
   const mid = H / 2, half = mid - 4
-  const impact = d => TIERS.filter(t => t.key !== 'opus').map(t => ({ t, v: (d.base?.[t.key] || 0) - (d.cost[t.key] || 0) })).filter(x => Math.abs(x.v) > 1e-9)
+  const impact = d => [...TIERS.filter(t => t.key !== 'opus').map(t => ({ t, v: (d.base?.[t.key] || 0) - (d.cost[t.key] || 0) })),
+    { t: EFFORT_SEG, v: d.effort || 0 }].filter(x => Math.abs(x.v) > 1e-9)
   const max = Math.max(...timeline.map(d => {
     const xs = impact(d)
     return Math.max(xs.filter(x => x.v > 0).reduce((s, x) => s + x.v, 0), -xs.filter(x => x.v < 0).reduce((s, x) => s + x.v, 0))
@@ -68,8 +78,9 @@ function chart(timeline) {
     const x = 4 + i * bw + bw * 0.15, w = bw * 0.7
     for (const { t, v } of impact(d)) {
       const h = Math.max(1, (Math.abs(v) / max) * half)
-      if (v > 0) { up -= h; out += `<rect x="${x}" y="${up}" width="${w}" height="${h}" rx="2" fill="${t.color}" opacity=".85"/>` }
-      else { out += `<rect x="${x}" y="${down}" width="${w}" height="${h}" rx="2" fill="${t.color}" opacity=".85" stroke="#f85149" stroke-width="1" vector-effect="non-scaling-stroke"/>`; down += h }
+      const fill = t === EFFORT_SEG ? 'url(#mr-hatch)' : t.color
+      if (v > 0) { up -= h; out += `<rect x="${x}" y="${up}" width="${w}" height="${h}" rx="2" fill="${fill}" opacity=".85"/>` }
+      else { out += `<rect x="${x}" y="${down}" width="${w}" height="${h}" rx="2" fill="${fill}" opacity=".85" stroke="#f85149" stroke-width="1" vector-effect="non-scaling-stroke"/>`; down += h }
     }
     // The whole column is the hover target, as in Boost's chart, so a thin bar is still easy to hit.
     out += `<rect class="mr-hit" x="${4 + i * bw}" y="0" width="${bw}" height="${H}" fill="transparent"/>`
@@ -83,6 +94,7 @@ function chart(timeline) {
       <div class="mr-sub" style="position:absolute;left:0;top:calc(50% - 8px)">0</div>
       <div class="mr-sub" style="position:absolute;left:0;bottom:-2px">−${usd(max)} lost</div>
       <svg class="mr-chart" viewBox="0 0 ${W} ${H}" width="100%" height="160" preserveAspectRatio="none" role="img" aria-label="Daily saving or loss from routing, by model">
+        <defs><pattern id="mr-hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="${EFFORT_SEG.color}"/><rect width="2" height="5" fill="#000" fill-opacity=".35"/></pattern></defs>
         <line x1="0" x2="${W}" y1="${mid}" y2="${mid}" stroke="#fff" stroke-opacity=".35" vector-effect="non-scaling-stroke"/>${bars}</svg>
     </div>
     <div class="mr-sub" style="display:flex;justify-content:space-between;margin-top:4px"><span>${first}</span><span>${routed ? '' : 'every agent in this period ran on Opus — nothing to compare'}</span><span>${last}</span></div>`
@@ -110,7 +122,8 @@ function dayTip(i) {
   let rows = tiers.map(t => row(`${t.name} <span class="text-white/50">· ${d.agents?.[t.key] ?? 0}</span>`, usd(d.cost[t.key]), { color: t.color })).join('')
   if (tiers.length > 1) rows += row('day total', usd(total), { cls: RULE + 'text-white' })
   rows += row('at Opus 5.5', usd(d.baseline), { cls: (tiers.length > 1 ? '' : RULE) + 'text-white/70' })
-  rows += row('saved', (saved < 0 ? '−' : '') + usd(Math.abs(saved)), { cls: 'text-white', dd: saved < 0 ? 'text-red-300' : 'text-emerald-300' })
+  rows += row('saved by model', (saved < 0 ? '−' : '') + usd(Math.abs(saved)), { cls: 'text-white', dd: saved < 0 ? 'text-red-300' : 'text-emerald-300' })
+  if (d.effort) rows += row('saved by effort (est.)', (d.effort < 0 ? '−' : '') + usd(Math.abs(d.effort)), { cls: 'text-white', dd: d.effort < 0 ? 'text-red-300' : 'text-emerald-300' })
   rows += row('running saved', (running < 0 ? '−' : '') + usd(Math.abs(running)), { cls: 'text-white', dd: running < 0 ? 'text-red-300/90' : 'text-emerald-300/90' })
   return `<div><p class="mb-1.5 font-semibold text-white">${dayName(d.date)}</p>${dl(rows)}</div>`
 }
@@ -213,23 +226,26 @@ function render() {
   el.removeAttribute('aria-busy')
   el.removeAttribute('aria-label')
   const T = data.totals
-  const saved = T.baseline - T.cost
+  const modelSaved = T.baseline - T.cost
+  const saved = modelSaved + (T.effortSaved || 0)
+  const effortRows = Object.entries(T.byEffort || {}).sort((a, b) => EFFORTS.findIndex(e => e.key === a[0]) - EFFORTS.findIndex(e => e.key === b[0]))
+  const byEffort = effortRows.map(([k, e]) => `<span><i style="background:${effortOf(k).color}"></i>${esc(k)}<b>${e.agents}</b> agents · <b>${usd(e.cost)}</b>${e.saved ? ` · <b style="color:${e.saved < 0 ? '#f85149' : '#3fb950'}">${e.saved < 0 ? '−' : ''}${usd(Math.abs(e.saved))}</b> est.` : ''}</span>`).join('')
   const spend = TIERS.filter(t => T.byTier[t.key]?.agents)
   const split = spend.map(t => `<div class="mr-seg" data-tier="${t.key}" style="width:${(T.byTier[t.key].cost / (T.cost || 1)) * 100}%;background:${t.color}"></div>`).join('')
   const legend = spend.map(t => `<span><i style="background:${t.color}"></i>${t.name}<b>${T.byTier[t.key].agents}</b> agents · <b>${usd(T.byTier[t.key].cost)}</b></span>`).join('')
 
-  const roles = data.roles.slice(0, 14).map(r => `<tr><td>${esc(r.role)}${r.lens ? `<span class="mr-sub">:${esc(r.lens)}</span>` : ''}</td><td>${pill(r.tier)}</td>
+  const roles = data.roles.slice(0, 16).map(r => `<tr><td>${esc(r.role)}${r.lens ? `<span class="mr-sub">:${esc(r.lens)}</span>` : ''}</td><td>${pill(r.tier)}</td><td>${epill(r.effort)}</td>
     <td class="n">${r.agents}</td><td class="n">${usd(r.cost)}</td><td class="n">${usd(r.cost / r.agents)}</td></tr>`).join('')
 
   // Every labelled agent on Opus means no routed script ran in this period — say so, or the table reads as a bug.
   const routed = data.roles.some(r => r.tier !== 'opus' && r.role !== '(no label)')
   const onlyOpus = data.roles.length && !routed
-    ? `<p class="mr-sub" style="margin:-4px 0 8px">Every labelled agent in this period ran on Opus: no workflow using the routing table has run yet. Scripts pick models only if they use <code>route()</code> from agent-routing/templates/route.js.</p>`
+    ? `<p class="mr-sub" style="margin:-4px 0 8px">Every labelled agent in this period ran on Opus: no workflow using the routing table has run yet. Scripts pick models only if they use <code>route()</code> from agent-ops/templates/route.js.</p>`
     : ''
 
   const quality = data.quality.map(q => {
     const judged = q.fixed + q.rejected
-    return `<tr><td>${esc(q.lens)}</td><td>${pill(q.tier)}</td><td class="n">${q.reviews}</td><td class="n">${q.findings}</td>
+    return `<tr><td>${esc(q.lens)}</td><td>${pill(q.tier)}</td><td>${epill(q.effort)}</td><td class="n">${q.reviews}</td><td class="n">${q.findings}</td>
       <td class="n">${q.blockers + q.majors}</td><td class="n">${judged ? `${q.fixed}/${judged}` : '<span class="mr-sub">—</span>'}</td>
       <td class="n">${judged ? Math.round((q.fixed / judged) * 100) + '%' : ''}</td></tr>`
   }).join('')
@@ -245,25 +261,28 @@ function render() {
     <div class="mr-head">
       <div>
         <h2 class="report-section-heading" style="color:var(--mr-accent)">Model routing</h2>
-        <div class="mr-big" style="margin-top:12px">${saved >= 0 ? usd(saved) : '−' + usd(-saved)}<small>${saved >= 0 ? 'saved by routing off Opus' : 'more than keeping it on Opus'}</small></div>
+        <div class="mr-big" style="margin-top:12px">${saved >= 0 ? usd(saved) : '−' + usd(-saved)}<small>${saved >= 0 ? 'saved by routing' : 'more than no routing'}</small></div>
+        <div class="mr-sub" style="margin-top:6px">model ${modelSaved < 0 ? '−' : ''}${usd(Math.abs(modelSaved))} against Opus 5.5 · effort ${(T.effortSaved || 0) < 0 ? '−' : ''}${usd(Math.abs(T.effortSaved || 0))} est. against ${esc(T.baselineEffort || 'xhigh')} (${T.effortEstimated || 0} agents${T.effortUnestimated ? `, ${T.effortUnestimated} without a reference` : ''})</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
       ${ops.toggles ? ops.switchHtml('routing', ops.toggles.routing, 'model routing', 'Tells new sessions to route workflow agents by role (~/.claude/rules/model-routing.md). Scripts already written keep the models they name.') : ''}
       <div class="mr-sub" style="text-align:right">${ops.toggles && !ops.toggles.routing ? '<b style="color:#fff">Off</b>: new sessions are not told to route · ' : ''}${T.agents} subagents · ${usd(T.cost)} API-equivalent spend${boost}<br>${data.days === 1 ? 'past 24 hours' : data.days ? `past ${data.days} days` : 'all time'}${T.unpriced ? ` · ${T.unpriced} unpriced` : ''}</div></div>
     </div>
     <div style="margin-top:18px">${chart(data.timeline)}</div>
-    <div class="mr-legend">${TIERS.filter(t => t.key !== 'opus').map(t => `<span><i style="background:${t.color}"></i>${t.name}</span>`).join('')}<span>above 0: saved against the same tokens at Opus 5.5 · below 0 (red edge): cost more</span></div>
+    <div class="mr-legend">${TIERS.filter(t => t.key !== 'opus').map(t => `<span><i style="background:${t.color}"></i>${t.name}</span>`).join('')}<span><i style="background:repeating-linear-gradient(45deg,#8b949e 0 3px,#4b5157 3px 5px)"></i>Effort (est.)</span><span>above 0: saved · below 0 (red edge): cost more</span></div>
     <div class="mr-grid">
       <div>
         <h3>Spend by model</h3>
         <div class="mr-split">${split}</div>
         <div class="mr-legend">${legend}</div>
+        <h3 style="margin-top:20px">By effort</h3>
+        <div class="mr-legend" style="margin-top:0">${byEffort || '<span>No effort recorded.</span>'}</div>
         <h3 style="margin-top:20px">Role → model</h3>${onlyOpus}
-        <div class="mr-scroll"><table><thead><tr><th>Role</th><th>Model</th><th class="n">Agents</th><th class="n">Spend</th><th class="n">Avg</th></tr></thead><tbody>${roles}</tbody></table></div>
+        <div class="mr-scroll"><table><thead><tr><th>Role</th><th>Model</th><th>Effort</th><th class="n">Agents</th><th class="n">Spend</th><th class="n">Avg</th></tr></thead><tbody>${roles}</tbody></table></div>
       </div>
       <div>
         <h3>Review quality by model</h3>
-        <div class="mr-scroll"><table><thead><tr><th>Lens</th><th>Model</th><th class="n">Reviews</th><th class="n">Findings</th><th class="n">Blk+Maj</th><th class="n">Accepted</th><th class="n">%</th></tr></thead><tbody>${quality || '<tr><td colspan="7" class="mr-sub">No reviews yet.</td></tr>'}</tbody></table></div>
+        <div class="mr-scroll"><table><thead><tr><th>Lens</th><th>Model</th><th>Effort</th><th class="n">Reviews</th><th class="n">Findings</th><th class="n">Blk+Maj</th><th class="n">Accepted</th><th class="n">%</th></tr></thead><tbody>${quality || '<tr><td colspan="8" class="mr-sub">No reviews yet.</td></tr>'}</tbody></table></div>
         <h3 style="margin-top:20px">Recent workflow runs</h3>
         <div class="mr-scroll"><table><thead><tr><th>Run</th><th>Started</th><th class="n">Agents</th><th class="n">O · S · H</th><th class="n">Spend</th><th class="n">Saved</th></tr></thead><tbody>${runs}</tbody></table></div>
       </div>
@@ -271,6 +290,7 @@ function render() {
     <div class="mr-note">
       Spend is derived: every subagent's recorded tokens priced from Boost's LiteLLM table at API list prices, whatever plan actually paid.
       “Saved” prices each non-Opus agent's tokens at Opus 5.5 (an Opus agent is its own baseline) — an estimate, since a smaller model spends a different number of tokens on the same job.
+      Effort savings are estimated: an agent below the default effort is compared with the average output tokens (thinking included) of the same role at that effort, priced at its model's output rate; input and cache effects are left out, and a role needs 3+ reference agents.
       “Accepted” is findings the fixer verified and fixed out of those it judged; runs before the routed lane carry no per-lens verdicts.
       ${priced ? `<br>${priced}.` : ''}
     </div>`

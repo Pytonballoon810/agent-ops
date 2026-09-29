@@ -11,7 +11,8 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync, execFile } from 'node:child_process'
-import { openDb, ingest, ingestUsage, tier } from './ingest.mjs'
+import { openDb, ingest, ingestUsage, tier, priceFor } from './ingest.mjs'
+import os from 'node:os'
 import { evaluate, windowed, lastSnapshot } from './jev.mjs'
 import { readToggles, setToggle } from './toggles.mjs'
 
@@ -71,9 +72,9 @@ function usage(days) {
   let start
   if (days > 0) { start = new Date(now); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - days) }
   const since = start ? start.toISOString().slice(0, 13) : '0000'
-  const rows = db.prepare(`SELECT hour, model, kind, SUM(messages) messages, SUM(input) input, SUM(output) output,
+  const rows = db.prepare(`SELECT hour, model, kind, effort, SUM(messages) messages, SUM(input) input, SUM(output) output,
       SUM(cache_read) cache_read, SUM(cache_write_5m + cache_write_1h) cache_write, SUM(cost_usd) cost, SUM(unpriced) unpriced
-    FROM usage WHERE hour >= ? GROUP BY hour, model, kind`).all(since)
+    FROM usage WHERE hour >= ? GROUP BY hour, model, kind, effort`).all(since)
   if (!start) start = rows.length ? new Date(rows.reduce((m, r) => r.hour < m ? r.hour : m, '9999') + ':00:00Z') : new Date(now)
   if (!hourly) start.setHours(0, 0, 0, 0)
 
@@ -96,8 +97,35 @@ function usage(days) {
     for (const f of ['input', 'output', 'cache_read', 'cache_write']) totals[f] += r[f]
     const bt = totals.byTier[t] ||= blank(); bt.tokens += tokens; bt.cost += r.cost; bt.messages += r.messages
     const bk = totals.byKind[r.kind]; bk.tokens += tokens; bk.cost += r.cost; bk.messages += r.messages
+    const ek = r.effort || '(unknown)'
+    const be = (totals.byEffort ||= {})[ek] ||= blank(); be.tokens += tokens; be.cost += r.cost; be.messages += r.messages
+    const bb = (b.effort ||= {})[ek] ||= blank(); bb.tokens += tokens; bb.cost += r.cost; bb.messages += r.messages
   }
   return { days, hourly, generated: now.toISOString(), totals, buckets: [...buckets.values()] }
+}
+
+// The effort sessions run at unless told otherwise: what "saved by lowering effort" is measured against.
+const BASE_EFFORT = (() => {
+  try { return JSON.parse(fs.readFileSync(path.join(os.homedir(), '.claude', 'settings.json'), 'utf8')).effortLevel || 'xhigh' } catch { return 'xhigh' }
+})()
+// Average output tokens per agent at the baseline effort, over all history: by role, lens and model tier,
+// and by role and lens alone as a fallback. Only groups of 3+ agents count as a reference.
+function effortReference() {
+  const rows = db.prepare(`SELECT role, lens, tier, COUNT(*) n, AVG(output) out FROM agents WHERE effort = ? GROUP BY role, lens, tier`).all(BASE_EFFORT)
+  const byTier = new Map(), byRole = new Map()
+  for (const r of rows) {
+    if (r.n >= 3) byTier.set(`${r.role}|${r.lens || ''}|${r.tier}`, r.out)
+    const k = `${r.role}|${r.lens || ''}`, x = byRole.get(k) || { n: 0, sum: 0 }
+    x.n += r.n; x.sum += r.out * r.n; byRole.set(k, x)
+  }
+  return { byTier, byRole: new Map([...byRole].filter(([, x]) => x.n >= 3).map(([k, x]) => [k, x.sum / x.n])) }
+}
+function effortSaving(a, ref) {
+  if (!a.effort || a.effort === BASE_EFFORT) return null
+  const out = ref.byTier.get(`${a.role}|${a.lens || ''}|${a.tier}`) ?? ref.byRole.get(`${a.role}|${a.lens || ''}`)
+  const rate = priceFor(a.model)?.price?.output_cost_per_token
+  if (out == null || !rate) return null
+  return (out - a.output) * rate
 }
 
 function summary(days) {
@@ -106,9 +134,11 @@ function summary(days) {
   const rows = db.prepare(`SELECT * FROM agents WHERE started >= ? ORDER BY started`).all(since)
   const tiers = ['opus', 'sonnet', 'haiku', 'fable', 'other']
   const blank = () => Object.fromEntries(tiers.map(t => [t, 0]))
-  const tot = { cost: 0, baseline: 0, agents: rows.length, unpriced: 0, byTier: {} }
+  const tot = { cost: 0, baseline: 0, agents: rows.length, unpriced: 0, byTier: {}, byEffort: {},
+    effortSaved: 0, effortEstimated: 0, effortUnestimated: 0, baselineEffort: BASE_EFFORT }
   for (const t of tiers) tot.byTier[t] = { agents: 0, cost: 0, tokens: 0 }
   const days_ = new Map(), roles = new Map(), pricedAs = new Map()
+  const ref = effortReference()
   for (const a of rows) {
     const cost = a.cost_usd ?? 0
     if (a.cost_usd == null) tot.unpriced++
@@ -120,34 +150,42 @@ function summary(days) {
     if (!days_.has(d)) days_.set(d, { date: d, cost: blank(), base: blank(), agents: blank(), baseline: 0 })
     // base[tier]: that tier's tokens at Opus prices, so base - cost is what routing to it saved (or lost) that day.
     const dd = days_.get(d); dd.cost[a.tier] += cost; dd.base[a.tier] += a.baseline_usd ?? 0; dd.agents[a.tier]++; dd.baseline += a.baseline_usd ?? 0
-    const rk = `${a.role}\u0000${a.lens || ''}\u0000${a.tier}`
-    if (!roles.has(rk)) roles.set(rk, { role: a.role, lens: a.lens, tier: a.tier, agents: 0, cost: 0, output: 0 })
-    const r = roles.get(rk); r.agents++; r.cost += cost; r.output += a.output
+    const eff = a.effort || '(unknown)'
+    const be = tot.byEffort[eff] ||= { agents: 0, cost: 0, saved: 0 }
+    be.agents++; be.cost += cost
+    // Effort saving, estimated: this agent's output tokens (thinking included) against the average of the
+    // same role at the baseline effort, priced at its model's output rate. Needs 3+ reference agents.
+    const est = effortSaving(a, ref)
+    if (est != null) { tot.effortSaved += est; tot.effortEstimated++; be.saved += est; dd.effort = (dd.effort || 0) + est }
+    else if (a.effort && a.effort !== BASE_EFFORT) tot.effortUnestimated++
+    const rk = `${a.role}\u0000${a.lens || ''}\u0000${a.tier}\u0000${eff}`
+    if (!roles.has(rk)) roles.set(rk, { role: a.role, lens: a.lens, tier: a.tier, effort: a.effort, agents: 0, cost: 0, output: 0, effortSaved: 0 })
+    const r = roles.get(rk); r.agents++; r.cost += cost; r.output += a.output; if (est != null) r.effortSaved += est
     const bare = a.model.replace(/-\d{8}$/, '')
     if (a.priced_as && a.priced_as !== bare && a.priced_as !== a.model) pricedAs.set(a.model, a.priced_as)
   }
 
   // Review quality per lens and reviewer model: findings raised, and what the fixer made of them.
-  const reviews = db.prepare(`SELECT r.*, a.tier, a.started FROM reviews r JOIN agents a USING (agent_id) WHERE a.started >= ?`).all(since)
+  const reviews = db.prepare(`SELECT r.*, a.tier, a.effort, a.started FROM reviews r JOIN agents a USING (agent_id) WHERE a.started >= ?`).all(since)
   const reviewer = new Map()   // latest reviewer of (run, chunk, lens) — a resumed run can hold two
   for (const r of reviews) {
     const k = `${r.run_id}|${r.chunk}|${r.lens}`
     if (!reviewer.has(k) || reviewer.get(k).started < r.started) reviewer.set(k, r)
   }
   const q = new Map()
-  const qk = (lens, tier) => {
-    const k = `${lens}|${tier}`
-    if (!q.has(k)) q.set(k, { lens, tier, reviews: 0, findings: 0, blockers: 0, majors: 0, fixed: 0, rejected: 0 })
+  const qk = (lens, tier, effort) => {
+    const k = `${lens}|${tier}|${effort || ''}`
+    if (!q.has(k)) q.set(k, { lens, tier, effort, reviews: 0, findings: 0, blockers: 0, majors: 0, fixed: 0, rejected: 0 })
     return q.get(k)
   }
   for (const r of reviewer.values()) {
-    const x = qk(r.lens, r.tier)
+    const x = qk(r.lens, r.tier, r.effort)
     x.reviews++; x.findings += r.findings; x.blockers += r.blockers; x.majors += r.majors
   }
   const outcomes = db.prepare(`SELECT f.* FROM fix_outcomes f JOIN agents a USING (agent_id) WHERE a.started >= ? AND f.lens IS NOT NULL`).all(since)
   for (const f of outcomes) {
     const r = reviewer.get(`${f.run_id}|${f.chunk}|${f.lens}`)
-    if (r) qk(f.lens, r.tier)[f.outcome] += f.n
+    if (r) qk(f.lens, r.tier, r.effort)[f.outcome] += f.n
   }
 
   const runs = db.prepare(`
