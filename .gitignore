@@ -1,0 +1,5 @@
+# Rebuilt from transcripts by `node dashboard/ingest.mjs --rebuild`
+*.db
+*.db-shm
+*.db-wal
+*.log
