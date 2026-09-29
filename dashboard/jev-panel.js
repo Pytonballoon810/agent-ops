@@ -5,7 +5,8 @@
 const ID = 'jev-meter'
 const API = '/__routing/api/jev'
 let days = window.__boostPeriod?.days ?? 30
-let data = null, failure = null, loading = true
+let data = null, failure = null, loading = true, lastSig = ''
+const ops = window.__agentOps
 
 const css = `
 #${ID} { --jm-dim: rgba(255,255,255,.55); --jm-faint: rgba(255,255,255,.08); --jm-accent: #d2a8ff; --jm-good: #3fb950; --jm-bad: #f85149; --jm-warn: #d29922; color: #fff; }
@@ -73,7 +74,9 @@ function body() {
         ${heading()}
         <div class="jm-big" style="margin-top:12px;color:${good ? 'var(--jm-good)' : 'var(--jm-bad)'}">${kfmt(T.net)}<small>prefix tokens ${good ? 'saved' : 'lost'} by the skill router</small></div>
       </div>
-      <div class="jm-sub" style="text-align:right">withheld listings ${kfmt(T.listingValue)} − injected skills ${kfmt(T.injectionCost)} · estimated<br>${period(days)} · ${T.sessions} sessions (${T.sessionsPositive} ahead, ${T.sessionsNegative} behind)${worst}</div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+      ${ops.toggles ? ops.switchHtml('skills', ops.toggles.skills, 'the skill router', 'The jev-skill-suggestion mod for new sessions (enabledPlugins in ~/.claude/settings.json). Sessions already running keep it as they loaded it.') : ''}
+      <div class="jm-sub" style="text-align:right">${ops.toggles && !ops.toggles.skills ? '<b style="color:#fff">Off</b>: new sessions get the full skill listing and no suggestions · ' : ''}withheld listings ${kfmt(T.listingValue)} − injected skills ${kfmt(T.injectionCost)} · estimated<br>${period(days)} · ${T.sessions} sessions (${T.sessionsPositive} ahead, ${T.sessionsNegative} behind)${worst}</div></div>
     </div>
     <div class="jm-stats">
       <span><b>${T.prompts}</b>prompts</span><span><b>${T.suggestions}</b>suggestions</span>
@@ -99,7 +102,7 @@ function body() {
     <div class="jm-note">
       Token figures are estimated from characters (${esc(data.provenance?.estimated || '4 chars/token')}); counts are measured.
       A session active in this period is counted whole, including turns before it began. Health and configuration describe the present, not the period.
-      Hover a pick for the start of its prompt. As of ${esc(when(data.generatedAt))}; re-read every 5 minutes.
+      Hover a pick for the start of its prompt. As of <span class="jm-asof">${esc(when(data.generatedAt))}</span>; live, re-read every 10 seconds.
     </div>`
 }
 
@@ -130,6 +133,7 @@ function render() {
   el.removeAttribute('aria-busy')
   el.removeAttribute('aria-label')
   el.innerHTML = body()
+  ops.bindSwitches(el, render)
 }
 
 // Boost's Tokens Saved pane, loaded or still its own skeleton (which has no text, only an aria-label).
@@ -166,18 +170,27 @@ async function load(skeleton = false) {
   const asked = days
   if (skeleton) { loading = true; failure = null; render() }
   try {
-    const r = await fetch(days ? `${API}?days=${days}` : API)
+    const [r, tg] = await Promise.all([fetch(days ? `${API}?days=${days}` : API), ops.refreshToggles()])
     const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }))
     if (asked !== days) return   // the period changed while this was in flight
+    // Live polling redraws only when something shown changed; the evaluation's own timing always does.
+    const sig = JSON.stringify([{ ...j, generatedAt: 0, tookMs: 0, scanned: 0 }, tg])
+    if (!skeleton && r.ok && !failure && sig === lastSig) {
+      const asOf = document.querySelector(`#${ID} .jm-asof`)
+      if (asOf) asOf.textContent = when(j.generatedAt)
+      return
+    }
+    lastSig = sig
     if (r.ok) { data = j; failure = null } else { failure = j; data = null }
   } catch (e) {
     failure = { error: String(e) }
   }
   loading = false
-  render()
+  if (skeleton) render(); else ops.whenIdle(document.getElementById(ID), render)
 }
 
 window.addEventListener('boost-period', e => { days = e.detail.days; load(true) })
+window.addEventListener('agent-ops-toggles', () => ops.whenIdle(document.getElementById(ID), render))
 
 // Mount as soon as Boost's Tokens Saved pane exists (showing the skeleton until data arrives), and put the
 // card back when React re-renders the page and drops a node it does not own.
@@ -185,4 +198,4 @@ new MutationObserver(() => { if (!document.getElementById(ID)) render() })
   .observe(document.body, { childList: true, subtree: true })
 
 load(true)
-setInterval(() => load(false), 60_000)
+setInterval(() => load(false), ops.POLL_MS)

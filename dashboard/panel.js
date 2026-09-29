@@ -9,7 +9,8 @@ const TIERS = [
   { key: 'fable', name: 'Fable', color: '#d2a8ff' },
 ]
 let days = window.__boostPeriod?.days ?? 30
-let data = null, boostTotals = null, loading = true, failure = null
+let data = null, boostTotals = null, loading = true, failure = null, lastSig = ''
+const ops = window.__agentOps
 
 const css = `
 #${ID} { --mr-dim: rgba(255,255,255,.55); --mr-faint: rgba(255,255,255,.08); --mr-accent: #f0883e; color: #fff; }
@@ -233,7 +234,9 @@ function render() {
         <h2 class="report-section-heading" style="color:var(--mr-accent)">Model routing</h2>
         <div class="mr-big" style="margin-top:12px">${saved >= 0 ? usd(saved) : '−' + usd(-saved)}<small>${saved >= 0 ? 'saved by routing off Opus' : 'more than keeping it on Opus'}</small></div>
       </div>
-      <div class="mr-sub" style="text-align:right">${T.agents} subagents · ${usd(T.cost)} API-equivalent spend${boost}<br>${data.days === 1 ? 'past 24 hours' : data.days ? `past ${data.days} days` : 'all time'}${T.unpriced ? ` · ${T.unpriced} unpriced` : ''}</div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+      ${ops.toggles ? ops.switchHtml('routing', ops.toggles.routing, 'model routing', 'Tells new sessions to route workflow agents by role (~/.claude/rules/model-routing.md). Scripts already written keep the models they name.') : ''}
+      <div class="mr-sub" style="text-align:right">${ops.toggles && !ops.toggles.routing ? '<b style="color:#fff">Off</b>: new sessions are not told to route · ' : ''}${T.agents} subagents · ${usd(T.cost)} API-equivalent spend${boost}<br>${data.days === 1 ? 'past 24 hours' : data.days ? `past ${data.days} days` : 'all time'}${T.unpriced ? ` · ${T.unpriced} unpriced` : ''}</div></div>
     </div>
     <div style="margin-top:18px">${chart(data.timeline)}</div>
     <div class="mr-legend">${TIERS.map(t => `<span><i style="background:${t.color}"></i>${t.name}</span>`).join('')}<span><i style="background:none;border-top:1px dashed #fff;height:0;border-radius:0"></i>same tokens at Opus 5.5</span></div>
@@ -259,6 +262,7 @@ function render() {
       ${priced ? `<br>${priced}.` : ''}
     </div>`
   bindHover(el)
+  ops.bindSwitches(el, render)
 }
 
 // Boost's Tokens Saved pane, loaded or still its own skeleton (which has no text, only an aria-label).
@@ -292,11 +296,16 @@ async function load(skeleton = false) {
   const asked = days
   if (skeleton) { loading = true; render() }
   try {
-    const [s, b] = await Promise.all([
+    const [s, b, tg] = await Promise.all([
       fetch(`/__routing/api/summary?days=${days}`).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json() }),
       fetch(`/api/totals${days ? `?days=${days}` : ''}`).then(r => r.json()).catch(() => null),
+      ops.refreshToggles(),
     ])
     if (asked !== days) return   // the period changed while this was in flight
+    // Live polling redraws only when something shown changed (`generated` always does).
+    const sig = JSON.stringify([{ ...s, generated: 0 }, b?.totals, tg])
+    if (!skeleton && !failure && sig === lastSig) return
+    lastSig = sig
     data = s; boostTotals = b?.totals || null; failure = null
   } catch (e) {
     if (asked !== days) return
@@ -305,10 +314,11 @@ async function load(skeleton = false) {
     if (skeleton) data = null
   }
   loading = false
-  render()
+  if (skeleton) render(); else ops.whenIdle(document.getElementById(ID), render)
 }
 
 window.addEventListener('boost-period', e => { days = e.detail.days; load(true) })
+window.addEventListener('agent-ops-toggles', () => ops.whenIdle(document.getElementById(ID), render))
 
 // Mount as soon as Boost's Tokens Saved pane exists (showing the skeleton until data arrives), and put the
 // card back when React re-renders the page and drops a node it does not own.
@@ -316,4 +326,4 @@ new MutationObserver(() => { if (!document.getElementById(ID)) render() })
   .observe(document.body, { childList: true, subtree: true })
 
 load(true)
-setInterval(() => load(false), 60_000)
+setInterval(() => load(false), ops.POLL_MS)

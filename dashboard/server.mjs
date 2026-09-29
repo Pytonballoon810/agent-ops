@@ -13,6 +13,7 @@ import path from 'node:path'
 import { execFileSync, execFile } from 'node:child_process'
 import { openDb, ingest, ingestUsage, tier } from './ingest.mjs'
 import { evaluate, windowed, lastSnapshot } from './jev.mjs'
+import { readToggles, setToggle } from './toggles.mjs'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
 const PORT = Number(process.env.ROUTING_PORT || 56300)
@@ -20,9 +21,10 @@ const PORT = Number(process.env.ROUTING_PORT || 56300)
 // in data/), and a period is a filter over its last parse, so a request never waits on a full scan.
 const JEV_INTERVAL_MS = Number(process.env.JEV_INTERVAL_MS || 5 * 60_000)
 let jevSnap = lastSnapshot(), jevError = null, jevRun = null
+let jevAt = 0
 function jevRefresh() {
   return jevRun ||= evaluate()
-    .then(s => { jevSnap = s; jevError = null })
+    .then(s => { jevSnap = s; jevError = null; jevAt = Date.now() })
     .catch(e => { jevError = String(e?.stack || e); log(`skill-router evaluation failed: ${jevError.split('\n')[0]}`) })
     .finally(() => { jevRun = null })
 }
@@ -52,7 +54,7 @@ async function discoverBoost() {
 }
 
 function refresh() {
-  if (Date.now() - lastIngest > 20_000) { ingest(db); lastIngest = Date.now() }
+  if (Date.now() - lastIngest > 8_000) { ingest(db); lastIngest = Date.now() }
 }
 
 // The Agent usage pane: every assistant message of every transcript, bucketed like Boost's own chart —
@@ -63,7 +65,7 @@ const KINDS = ['chat', 'subagent', 'workflow']
 const pad2 = n => String(n).padStart(2, '0')
 const localDay = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
 function usage(days) {
-  if (Date.now() - lastUsageIngest > 20_000) { ingestUsage(db); lastUsageIngest = Date.now() }
+  if (Date.now() - lastUsageIngest > 8_000) { ingestUsage(db); lastUsageIngest = Date.now() }
   const hourly = false
   const now = new Date()
   let start
@@ -197,7 +199,9 @@ async function proxy(req, res) {
 // The skill-router snapshot, all time or for Boost's period (?days=N, sessions active in the window).
 // An evaluation error becomes JSON the card shows; it never reaches Boost's page.
 async function jevSnapshot(u) {
-  if (!jevSnap || u.searchParams.has('fresh')) await jevRefresh()
+  // The cards poll every 10 s; a warm evaluation re-reads only changed transcripts (~0.3 s), so a
+  // snapshot older than 10 s is refreshed on the request that finds it.
+  if (!jevSnap || u.searchParams.has('fresh') || Date.now() - jevAt > 10_000) await jevRefresh()
   const days = Number(u.searchParams.get('days') || 0)
   let view = jevSnap
   if (days > 0) {
@@ -240,6 +244,24 @@ async function watchBoost() {
 http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://x')
+    if (u.pathname === '/__routing/api/toggles') {
+      const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)) }
+      if (req.method === 'GET') return json(200, readToggles())
+      // These change ~/.claude, so only this page may call them: the right Host (no DNS rebinding), a
+      // same-origin Origin, and a custom header a cross-origin page cannot send without a preflight,
+      // which this server never answers.
+      const origins = [`http://127.0.0.1:${PORT}`, `http://localhost:${PORT}`]
+      if (req.method !== 'POST' || !origins.includes(`http://${req.headers.host}`) || (req.headers.origin && !origins.includes(req.headers.origin)) || req.headers['x-agent-ops'] !== '1') {
+        return json(403, { error: 'refused' })
+      }
+      const body = await new Promise(r => { const c = []; req.on('data', d => c.push(d)); req.on('end', () => r(Buffer.concat(c).toString())) })
+      try {
+        const { feature, on } = JSON.parse(body)
+        const state = setToggle(feature, !!on)
+        log(`switched ${feature} ${on ? 'on' : 'off'}`)
+        return json(200, state)
+      } catch (e) { return json(400, { error: String(e.message || e) }) }
+    }
     if (u.pathname === '/__routing/api/usage') {
       const days = Math.max(0, Number(u.searchParams.get('days') ?? 30) || 0)
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })

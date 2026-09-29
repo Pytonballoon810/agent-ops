@@ -22,7 +22,7 @@ const HATCH = 'repeating-linear-gradient(45deg, rgba(0,0,0,.28) 0px, rgba(0,0,0,
 const PLOT = 216
 
 let days = window.__boostPeriod?.days ?? 30
-let data = null, loading = true, failure = null
+let data = null, loading = true, failure = null, lastSig = ''
 let metric = 'cost'
 try { metric = localStorage.getItem('agent-usage.metric') === 'tokens' ? 'tokens' : 'cost' } catch {}
 const hidden = new Set()
@@ -259,6 +259,10 @@ async function load(skeleton = false) {
     if (!r.ok) throw new Error(`HTTP ${r.status}`)
     const j = await r.json()
     if (asked !== days) return
+    // Live polling redraws only when a figure changed (`generated` always does).
+    const sig = JSON.stringify({ ...j, generated: 0 })
+    if (!skeleton && !failure && sig === lastSig) return
+    lastSig = sig
     data = j; failure = null
   } catch (e) {
     if (asked !== days) return
@@ -266,7 +270,7 @@ async function load(skeleton = false) {
     if (skeleton) data = null
   }
   loading = false
-  render()
+  if (skeleton) render(); else window.__agentOps.whenIdle(document.getElementById(ID), render)
 }
 
 window.addEventListener('boost-period', e => { days = e.detail.days; load(true) })
@@ -274,4 +278,4 @@ new MutationObserver(() => { if (!document.getElementById(ID)) render() })
   .observe(document.body, { childList: true, subtree: true })
 
 load(true)
-setInterval(() => load(false), 60_000)
+setInterval(() => load(false), window.__agentOps.POLL_MS)

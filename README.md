@@ -41,6 +41,23 @@ Two cards sit under it:
   minutes (`JEV_INTERVAL_MS`), caching per file in `dashboard/data/`. It also runs alone:
   `node dashboard/jev.mjs` prints the headline.
 
+**Switches.** Each card has an On/Off switch in Boost's own switch markup (`toggles.mjs`). Both act on
+*new* sessions only; a running session keeps what it loaded.
+
+- *Model routing*: on installs `rules/global-pointer.md` as `~/.claude/rules/model-routing.md`, off
+  removes it. Scripts already written keep the models they name.
+- *Skill router*: off sets `enabledPlugins["jev-skill-suggestion@skills-dir"] = false` in
+  `~/.claude/settings.json` (checked headlessly: the plugin's hooks module is then not loaded); on
+  removes that entry, so a round trip leaves the file byte-identical.
+
+The switch endpoint only answers this page: right Host, same-origin Origin, and an `x-agent-ops`
+header that a cross-origin page cannot send without a preflight the server never grants.
+
+**Live.** All three poll every 10 s and redraw only when a figure changed, never under the pointer
+(a redraw would drop the hover and its tooltip; it waits until the pointer leaves). The server
+re-reads new transcript lines at most every 8 s and re-evaluates the skill router when its snapshot
+is older than 10 s.
+
 Both follow Boost's period selector through `period.js`, which reads Boost's `boost.report.days` and
 watches the period Boost's page asks its API for, then announces it as a `boost-period` event. Both
 show a pulsing skeleton while loading, as Boost's panes do, including after a period change.
