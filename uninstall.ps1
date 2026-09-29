@@ -1,9 +1,9 @@
 <#
-  Stops and removes the agent-routing task and whatever still holds its port. Leaves the code and
+  Stops and removes the agent-ops task and whatever still holds its port. Leaves the code and
   dashboard/routing.db alone.
 #>
 [CmdletBinding()]
-param([string]$TaskName = 'agent-routing')
+param([string]$TaskName = 'agent-ops')
 
 $ErrorActionPreference = 'Continue'
 

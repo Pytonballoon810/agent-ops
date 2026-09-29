@@ -3,15 +3,14 @@
 
   `boost ui` is started by hand and takes a new port each launch, so this server runs all the
   time, costs nothing while Boost is down, and opens http://127.0.0.1:<Port>/ in the browser each
-  time a new `boost ui` appears. A Scheduled Task rather than a service, like jev-meter, and for the
-  same reasons: node is not service-aware, and the data is the user's own under their profile.
+  time a new `boost ui` appears. A Scheduled Task rather than a service: node is not service-aware, and the data is the user's own under their profile.
 
-  No elevation required. The jev-meter card needs jev-meter's own task (its install.ps1).
+  No elevation required.
 #>
 [CmdletBinding()]
 param(
   [int]$Port = 56300,
-  [string]$TaskName = 'agent-routing'
+  [string]$TaskName = 'agent-ops'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,7 +50,7 @@ Register-ScheduledTask `
   -Trigger $trigger `
   -Settings $settings `
   -Principal $principal `
-  -Description "Serves JFrog Boost's dashboard with the model-routing and jev-meter cards on http://127.0.0.1:$Port and opens it when boost ui starts" | Out-Null
+  -Description "Serves JFrog Boost's dashboard with the model-routing and skill-router cards on http://127.0.0.1:$Port and opens it when boost ui starts" | Out-Null
 
 if ($Port -eq 56300) {
   [Environment]::SetEnvironmentVariable('ROUTING_PORT', $null, 'User')

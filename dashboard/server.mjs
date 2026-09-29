@@ -1,10 +1,10 @@
-// Serves Boost's own dashboard with the model-routing and jev-meter cards added under "Tokens Saved".
+// Serves Boost's own dashboard with the model-routing and skill-router cards added under "Tokens Saved".
 // Boost's binary and its page are untouched: this proxies every request to the running
 // `boost ui` server and injects scripts into the HTML, so a Boost update cannot erase them.
 // It also watches for `boost ui` starting and opens this page when it does.
 //
 //   node server.mjs            http://127.0.0.1:56300/
-//   ROUTING_PORT=... BOOST_URL=http://127.0.0.1:NNNNN JEV_METER_PORT=... node server.mjs
+//   ROUTING_PORT=... BOOST_URL=http://127.0.0.1:NNNNN JEV_INTERVAL_MS=... node server.mjs
 //   ROUTING_NO_OPEN=1          do not open a browser tab when Boost starts
 
 import http from 'node:http'
@@ -12,13 +12,20 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync, execFile } from 'node:child_process'
 import { openDb, ingest } from './ingest.mjs'
+import { evaluate, windowed, lastSnapshot } from './jev.mjs'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
 const PORT = Number(process.env.ROUTING_PORT || 56300)
-const JEV_URL = `http://127.0.0.1:${Number(process.env.JEV_METER_PORT || 7431)}`
-// The jev card's script is read from jev-meter's folder, not fetched from its server, so the card
-// can still say "jev-meter is not running" when that server is down.
-const JEV_DIR = process.env.JEV_METER_DIR || path.join(HERE, '..', '..', 'jev-meter')
+// The skill-router card's numbers: jev.mjs re-reads changed transcripts on a timer (incremental, cached
+// in data/), and a period is a filter over its last parse, so a request never waits on a full scan.
+const JEV_INTERVAL_MS = Number(process.env.JEV_INTERVAL_MS || 5 * 60_000)
+let jevSnap = lastSnapshot(), jevError = null, jevRun = null
+function jevRefresh() {
+  return jevRun ||= evaluate()
+    .then(s => { jevSnap = s; jevError = null })
+    .catch(e => { jevError = String(e?.stack || e); log(`skill-router evaluation failed: ${jevError.split('\n')[0]}`) })
+    .finally(() => { jevRun = null })
+}
 const db = openDb()
 let lastIngest = 0
 
@@ -137,24 +144,25 @@ async function proxy(req, res) {
     // period.js first and classic, so it wraps fetch before Boost's own modules make their first request.
     const head = '<script src="/__routing/period.js"></script>'
     html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, m => m + head) : head + html
-    const tags = '<script type="module" src="/__routing/panel.js"></script><script type="module" src="/__jev/boost-panel.js"></script>'
+    const tags = '<script type="module" src="/__routing/panel.js"></script><script type="module" src="/__routing/jev-panel.js"></script>'
     buf = Buffer.from(html.includes('</body>') ? html.replace('</body>', tags + '</body>') : html + tags)
   }
   res.writeHead(up.status, out)
   res.end(buf)
 }
 
-// jev-meter owns its card and its data; this only forwards /__jev/<path> to it. Its failure must
-// never reach Boost's page, so any error becomes a JSON 502 the card can show.
-async function jev(req, res, rest) {
-  try {
-    const up = await fetch(JEV_URL + rest, { signal: AbortSignal.timeout(15_000) })
-    res.writeHead(up.status, { 'content-type': up.headers.get('content-type') || 'application/octet-stream', 'cache-control': 'no-store' })
-    res.end(Buffer.from(await up.arrayBuffer()))
-  } catch (e) {
-    res.writeHead(502, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-    res.end(JSON.stringify({ error: `jev-meter is not answering on ${JEV_URL}`, down: true }))
+// The skill-router snapshot, all time or for Boost's period (?days=N, sessions active in the window).
+// An evaluation error becomes JSON the card shows; it never reaches Boost's page.
+async function jevSnapshot(u) {
+  if (!jevSnap || u.searchParams.has('fresh')) await jevRefresh()
+  const days = Number(u.searchParams.get('days') || 0)
+  let view = jevSnap
+  if (days > 0) {
+    view = windowed(jevSnap, days)
+    // A snapshot read from disk at startup has no parsed sessions behind it until the first evaluation.
+    if (!view) { await jevRefresh(); view = windowed(jevSnap, days) }
   }
+  return view || { error: jevError || 'no evaluation yet' }
 }
 
 // Start with Boost: `boost ui` is started by hand and takes a new port each time. Poll for it, and
@@ -189,19 +197,15 @@ async function watchBoost() {
 http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://x')
-    if (u.pathname === '/__routing/panel.js' || u.pathname === '/__routing/period.js') {
+    if (['/__routing/panel.js', '/__routing/period.js', '/__routing/jev-panel.js'].includes(u.pathname)) {
       res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
       return res.end(fs.readFileSync(path.join(HERE, path.basename(u.pathname))))
     }
-    if (u.pathname === '/__jev/boost-panel.js') {
-      let js
-      try { js = fs.readFileSync(path.join(JEV_DIR, 'public', 'boost-panel.js')) } catch {
-        js = `console.warn('jev-meter card: boost-panel.js not found under ${JEV_DIR.replace(/\\/g, '/')}')`
-      }
-      res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
-      return res.end(js)
+    if (u.pathname === '/__routing/api/jev') {
+      const body = await jevSnapshot(u)
+      res.writeHead(body.error ? 503 : 200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(body))
     }
-    if (u.pathname.startsWith('/__jev/')) return jev(req, res, u.pathname.slice('/__jev'.length) + u.search)
     if (u.pathname === '/__routing/api/summary') {
       const days = Math.max(0, Number(u.searchParams.get('days') ?? 30) || 0)
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
@@ -217,6 +221,8 @@ http.createServer(async (req, res) => {
   process.exit(1)
 }).listen(PORT, '127.0.0.1', async () => {
   await watchBoost()
-  console.log(`model-routing dashboard on http://127.0.0.1:${PORT}/  (Boost at ${boostUrl || 'not found yet'})`)
+  console.log(`agent-ops dashboard on http://127.0.0.1:${PORT}/  (Boost at ${boostUrl || 'not found yet'})`)
   setInterval(() => watchBoost().catch(() => {}), 5_000)
+  jevRefresh()
+  setInterval(jevRefresh, JEV_INTERVAL_MS).unref?.()
 })
