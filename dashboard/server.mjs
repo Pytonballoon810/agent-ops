@@ -128,6 +128,25 @@ function effortSaving(a, ref) {
   return (out - a.output) * rate
 }
 
+// The configured rules, for the Role → model table: templates/route.js's ROUTES, read from the file each
+// time so an edit shows at once. Per role key ("impl", "fix", "review:spec") every distinct
+// { model, effort } across lanes, with the lanes that set it. A running script keeps its own copy.
+function routeRules() {
+  try {
+    const src = fs.readFileSync(path.join(HERE, '..', 'templates', 'route.js'), 'utf8')
+    const m = /const ROUTES = (\{[\s\S]*?\n\})\n/.exec(src)
+    const ROUTES = new Function(`return ${m[1]}`)()   // our own file, an object literal
+    const rules = {}
+    for (const [lane, roles] of Object.entries(ROUTES)) for (const [key, r] of Object.entries(roles)) {
+      const k = `${r.model}|${r.effort || ''}`
+      const list = rules[key] ||= []
+      const hit = list.find(x => x.k === k)
+      if (hit) hit.lanes.push(lane); else list.push({ k, model: r.model, effort: r.effort || null, lanes: [lane] })
+    }
+    return rules
+  } catch { return {} }
+}
+
 function summary(days) {
   refresh()
   const since = days > 0 ? new Date(Date.now() - days * 86400_000).toISOString() : '0000'
@@ -161,6 +180,7 @@ function summary(days) {
     const rk = `${a.role}\u0000${a.lens || ''}\u0000${a.tier}\u0000${eff}`
     if (!roles.has(rk)) roles.set(rk, { role: a.role, lens: a.lens, tier: a.tier, effort: a.effort, agents: 0, cost: 0, output: 0, effortSaved: 0 })
     const r = roles.get(rk); r.agents++; r.cost += cost; r.output += a.output; if (est != null) r.effortSaved += est
+    if (!r.last || a.started > r.last) r.last = a.started
     const bare = a.model.replace(/-\d{8}$/, '')
     if (a.priced_as && a.priced_as !== bare && a.priced_as !== a.model) pricedAs.set(a.model, a.priced_as)
   }
@@ -198,7 +218,7 @@ function summary(days) {
     timeline: [...days_.values()].sort((a, b) => a.date.localeCompare(b.date)),
     roles: [...roles.values()].sort((a, b) => b.cost - a.cost),
     quality: [...q.values()].sort((a, b) => a.lens.localeCompare(b.lens) || a.tier.localeCompare(b.tier)),
-    runs, pricedAs: Object.fromEntries(pricedAs),
+    runs, pricedAs: Object.fromEntries(pricedAs), rules: routeRules(),
   }
 }
 

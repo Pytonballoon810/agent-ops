@@ -234,8 +234,29 @@ function render() {
   const split = spend.map(t => `<div class="mr-seg" data-tier="${t.key}" style="width:${(T.byTier[t.key].cost / (T.cost || 1)) * 100}%;background:${t.color}"></div>`).join('')
   const legend = spend.map(t => `<span><i style="background:${t.color}"></i>${t.name}<b>${T.byTier[t.key].agents}</b> agents · <b>${usd(T.byTier[t.key].cost)}</b></span>`).join('')
 
-  const roles = data.roles.slice(0, 16).map(r => `<tr><td>${esc(r.role)}${r.lens ? `<span class="mr-sub">:${esc(r.lens)}</span>` : ''}</td><td>${pill(r.tier)}</td><td>${epill(r.effort)}</td>
-    <td class="n">${r.agents}</td><td class="n">${usd(r.cost)}</td><td class="n">${usd(r.cost / r.agents)}</td></tr>`).join('')
+  // Rule: what templates/route.js configures for this role, per lane where lanes differ. A row that ran on
+  // a different model or effort is marked; a role with no rule inherits the session (Opus, xhigh).
+  const ruleCell = r => {
+    const list = (data.rules || {})[r.role === 'review' && r.lens ? `review:${r.lens}` : r.role]
+    if (!list) return { html: '<span class="mr-sub">none</span>', match: null }
+    const html = list.map(x => `${pill(x.model)} ${x.effort ? epill(x.effort) : ''}${list.length > 1 ? `<span class="mr-sub"> ${esc(x.lanes.join('/'))}</span>` : ''}`).join('<br>')
+    // full: model and effort as the rule says · model: the model follows it, the effort does not (yet) · off: neither
+    const match = list.some(x => x.model === r.tier && (!x.effort || x.effort === r.effort)) ? 'full'
+      : list.some(x => x.model === r.tier) ? 'model' : 'off'
+    return { html, match }
+  }
+  const MARK = {
+    model: ' title="Model follows the rule, effort does not: the run started before effort routing, or an override" style="background:rgba(210,153,34,.10)"',
+    off: ' title="Neither model nor effort follow the rule: a script without route(), a run from before routing, or an override" style="background:rgba(248,81,73,.08)"',
+  }
+  // Most recently run first, so the current run's agents are at the top.
+  const roles = [...data.roles].sort((a, b) => String(b.last || '').localeCompare(String(a.last || ''))).map(r => {
+    const rule = ruleCell(r)
+    const off = MARK[rule.match] || ''
+    const ago = r.last ? new Date(r.last).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
+    return `<tr${off}><td>${esc(r.role)}${r.lens ? `<span class="mr-sub">:${esc(r.lens)}</span>` : ''}</td><td class="mr-sub">${esc(ago)}</td><td>${pill(r.tier)} ${epill(r.effort)}</td><td>${rule.html}</td>
+    <td class="n">${r.agents}</td><td class="n">${usd(r.cost)}</td><td class="n">${usd(r.cost / r.agents)}</td></tr>`
+  }).join('')
 
   // Every labelled agent on Opus means no routed script ran in this period — say so, or the table reads as a bug.
   const routed = data.roles.some(r => r.tier !== 'opus' && r.role !== '(no label)')
@@ -278,7 +299,8 @@ function render() {
         <h3 style="margin-top:20px">By effort</h3>
         <div class="mr-legend" style="margin-top:0">${byEffort || '<span>No effort recorded.</span>'}</div>
         <h3 style="margin-top:20px">Role → model</h3>${onlyOpus}
-        <div class="mr-scroll"><table><thead><tr><th>Role</th><th>Model</th><th>Effort</th><th class="n">Agents</th><th class="n">Spend</th><th class="n">Avg</th></tr></thead><tbody>${roles}</tbody></table></div>
+        <p class="mr-sub" style="margin:-4px 0 8px">“Ran on” is what the transcripts show; “Rule” is templates/route.js. Amber: model follows the rule, effort not yet · red: neither (mostly runs from before routing).</p>
+        <div class="mr-scroll"><table><thead><tr><th>Role</th><th>Last run</th><th>Ran on</th><th>Rule</th><th class="n">Agents</th><th class="n">Spend</th><th class="n">Avg</th></tr></thead><tbody>${roles}</tbody></table></div>
       </div>
       <div>
         <h3>Review quality by model</h3>
