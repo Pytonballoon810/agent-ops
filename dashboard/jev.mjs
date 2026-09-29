@@ -388,6 +388,21 @@ function auditConfig(config, sessions) {
 // Aggregation
 // ---------------------------------------------------------------------------
 
+// Per local day: the value of listings withheld and the cost of skill bodies injected, each booked on
+// the day it entered the conversation — both accrue over the turns that follow, which may be later days.
+// Same sources as the totals: withheld from main sessions, injected from every session.
+function daily(main, sessions) {
+  const byDay = new Map()
+  const day = ts => {
+    const d = new Date(ts)
+    return isNaN(d) ? null : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  }
+  const at = k => byDay.get(k) || byDay.set(k, { date: k, withheld: 0, injected: 0 }).get(k)
+  for (const s of main) for (const l of s.listings) { const k = day(l.ts); if (k) at(k).withheld += l.prefixValue }
+  for (const s of sessions) for (const p of s.picks) { const k = day(p.ts); if (k) at(k).injected += p.prefixCost }
+  return [...byDay.values()].sort((a, b) => a.date.localeCompare(b.date))
+}
+
 function aggregate(sessions, config) {
   const main = sessions.filter((s) => !s.isSubagent);
   const subs = sessions.filter((s) => s.isSubagent);
@@ -475,6 +490,7 @@ function aggregate(sessions, config) {
   }
 
   return {
+    timeline: daily(main, sessions),
     totals: {
       sessions: main.length,
       subagentSessions: subs.length,

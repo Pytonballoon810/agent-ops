@@ -50,29 +50,42 @@ const tierOf = k => TIERS.find(t => t.key === k) || { key: k, name: k, color: '#
 const pill = k => { const t = tierOf(k); return `<span class="mr-pill" style="background:${t.color}22;color:${t.color}">${t.name}</span>` }
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c])
 
+// Impact per day around a centred zero: each routed model's saving against the same tokens at Opus 5.5
+// (base - cost) stacks up from zero, a loss stacks down. Opus is its own baseline, so it adds nothing.
+// The scale is symmetric, so zero always sits in the middle and up and down compare directly.
 function chart(timeline) {
-  const W = 640, H = 150, pad = 18
+  const W = 640, H = 150
   if (!timeline.length) return `<div class="mr-sub">No subagent runs in this period.</div>`
-  const max = Math.max(...timeline.map(d => Math.max(d.baseline, TIERS.reduce((s, t) => s + (d.cost[t.key] || 0), 0))), 0.01)
+  const mid = H / 2, half = mid - 4
+  const impact = d => TIERS.filter(t => t.key !== 'opus').map(t => ({ t, v: (d.base?.[t.key] || 0) - (d.cost[t.key] || 0) })).filter(x => Math.abs(x.v) > 1e-9)
+  const max = Math.max(...timeline.map(d => {
+    const xs = impact(d)
+    return Math.max(xs.filter(x => x.v > 0).reduce((s, x) => s + x.v, 0), -xs.filter(x => x.v < 0).reduce((s, x) => s + x.v, 0))
+  }), 0.01)
   const bw = (W - 8) / timeline.length
   const bars = timeline.map((d, i) => {
-    let y = H - pad, out = ''
+    let up = mid, down = mid, out = ''
     const x = 4 + i * bw + bw * 0.15, w = bw * 0.7
-    for (const t of TIERS) {
-      const h = ((d.cost[t.key] || 0) / max) * (H - pad - 8)
-      if (h > 0) { y -= h; out += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="2" fill="${t.color}" opacity=".85"/>` }
+    for (const { t, v } of impact(d)) {
+      const h = Math.max(1, (Math.abs(v) / max) * half)
+      if (v > 0) { up -= h; out += `<rect x="${x}" y="${up}" width="${w}" height="${h}" rx="2" fill="${t.color}" opacity=".85"/>` }
+      else { out += `<rect x="${x}" y="${down}" width="${w}" height="${h}" rx="2" fill="${t.color}" opacity=".85" stroke="#f85149" stroke-width="1" vector-effect="non-scaling-stroke"/>`; down += h }
     }
-    const by = H - pad - (d.baseline / max) * (H - pad - 8)
-    out += `<line x1="${x - 2}" x2="${x + w + 2}" y1="${by}" y2="${by}" stroke="#fff" stroke-opacity=".6" stroke-dasharray="3 2" vector-effect="non-scaling-stroke"/>`
     // The whole column is the hover target, as in Boost's chart, so a thin bar is still easy to hit.
-    out += `<rect class="mr-hit" x="${4 + i * bw}" y="0" width="${bw}" height="${H - pad}" fill="transparent"/>`
-    return `<g class="mr-col" data-i="${i}" data-top="${Math.min(y, by)}">${out}</g>`
+    out += `<rect class="mr-hit" x="${4 + i * bw}" y="0" width="${bw}" height="${H}" fill="transparent"/>`
+    return `<g class="mr-col" data-i="${i}" data-top="${up}">${out}</g>`
   }).join('')
   const first = timeline[0].date, last = timeline[timeline.length - 1].date
+  const routed = timeline.some(d => impact(d).length)
   // Labels are HTML beside the SVG: text inside a stretched viewBox stretches with it.
-  return `<div class="mr-sub" style="margin-bottom:4px">${usd(max)}</div>
-    <svg class="mr-chart" viewBox="0 0 ${W} ${H - pad}" width="100%" height="140" preserveAspectRatio="none" role="img" aria-label="Daily subagent spend by model">${bars}</svg>
-    <div class="mr-sub" style="display:flex;justify-content:space-between;margin-top:4px"><span>${first}</span><span>${last}</span></div>`
+  return `<div style="position:relative">
+      <div class="mr-sub" style="position:absolute;left:0;top:-2px">+${usd(max)} saved</div>
+      <div class="mr-sub" style="position:absolute;left:0;top:calc(50% - 8px)">0</div>
+      <div class="mr-sub" style="position:absolute;left:0;bottom:-2px">−${usd(max)} lost</div>
+      <svg class="mr-chart" viewBox="0 0 ${W} ${H}" width="100%" height="160" preserveAspectRatio="none" role="img" aria-label="Daily saving or loss from routing, by model">
+        <line x1="0" x2="${W}" y1="${mid}" y2="${mid}" stroke="#fff" stroke-opacity=".35" vector-effect="non-scaling-stroke"/>${bars}</svg>
+    </div>
+    <div class="mr-sub" style="display:flex;justify-content:space-between;margin-top:4px"><span>${first}</span><span>${routed ? '' : 'every agent in this period ran on Opus — nothing to compare'}</span><span>${last}</span></div>`
 }
 
 // Tooltips reuse Boost's own classes (report-meter-tooltip, report-savings-tooltip) and the layout of
@@ -239,7 +252,7 @@ function render() {
       <div class="mr-sub" style="text-align:right">${ops.toggles && !ops.toggles.routing ? '<b style="color:#fff">Off</b>: new sessions are not told to route · ' : ''}${T.agents} subagents · ${usd(T.cost)} API-equivalent spend${boost}<br>${data.days === 1 ? 'past 24 hours' : data.days ? `past ${data.days} days` : 'all time'}${T.unpriced ? ` · ${T.unpriced} unpriced` : ''}</div></div>
     </div>
     <div style="margin-top:18px">${chart(data.timeline)}</div>
-    <div class="mr-legend">${TIERS.map(t => `<span><i style="background:${t.color}"></i>${t.name}</span>`).join('')}<span><i style="background:none;border-top:1px dashed #fff;height:0;border-radius:0"></i>same tokens at Opus 5.5</span></div>
+    <div class="mr-legend">${TIERS.filter(t => t.key !== 'opus').map(t => `<span><i style="background:${t.color}"></i>${t.name}</span>`).join('')}<span>above 0: saved against the same tokens at Opus 5.5 · below 0 (red edge): cost more</span></div>
     <div class="mr-grid">
       <div>
         <h3>Spend by model</h3>

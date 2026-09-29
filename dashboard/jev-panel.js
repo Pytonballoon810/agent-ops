@@ -43,6 +43,104 @@ const period = d => d ? (d === 1 ? 'past 24 hours' : `past ${d} days`) : 'all ti
 const LEVEL = { fail: ['var(--jm-bad)', 0], warn: ['var(--jm-warn)', 1], pass: ['var(--jm-good)', 2] }
 const when = ts => { const d = new Date(ts); return isNaN(d) ? '' : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
 
+// Net prefix tokens per day (withheld − injected) as a line around a centred zero: green fill where the
+// router saved, red where it cost more. One point per local day over Boost's range (N days back to
+// today); all time runs from the first day with data. Each item is booked on the day it entered.
+const dkey = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+function series() {
+  const tl = data.timeline || []
+  const by = new Map(tl.map(x => [x.date, x]))
+  const today = new Date(); today.setHours(0, 0, 0, 0)
+  const start = new Date(today)
+  if (days > 0) start.setDate(start.getDate() - days)
+  else if (tl.length) { const [y, m, d] = tl[0].date.split('-').map(Number); start.setFullYear(y, m - 1, d) }
+  const out = []
+  let run = 0
+  for (const d = new Date(start); d <= today; d.setDate(d.getDate() + 1)) {
+    const x = by.get(dkey(d)) || { withheld: 0, injected: 0 }
+    const net = x.withheld - x.injected
+    run += net
+    out.push({ date: dkey(d), withheld: x.withheld, injected: x.injected, net, run })
+  }
+  return out
+}
+function lineChart(pts) {
+  if (pts.length < 2) return ''
+  const W = 640, H = 150, mid = H / 2, half = mid - 6
+  const max = Math.max(...pts.map(p => Math.abs(p.net)), 1)
+  const X = i => 4 + (i / (pts.length - 1)) * (W - 8), Y = v => mid - (v / max) * half
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(p.net).toFixed(1)}`).join('')
+  const area = `${line}L${X(pts.length - 1)},${mid}L${X(0)},${mid}Z`
+  const dates = pts.map(p => p.date)
+  return `<h3 style="margin-top:20px">Net per day</h3>
+    <div style="position:relative">
+      <div class="jm-sub" style="position:absolute;left:0;top:-2px">+${kfmt(max)} saved</div>
+      <div class="jm-sub" style="position:absolute;left:0;top:calc(50% - 8px)">0</div>
+      <div class="jm-sub" style="position:absolute;left:0;bottom:-2px">${kfmt(-max)} cost</div>
+      <svg class="jm-line" viewBox="0 0 ${W} ${H}" width="100%" height="150" preserveAspectRatio="none" role="img" aria-label="Net prefix tokens per day from the skill router">
+        <defs><clipPath id="jm-up"><rect x="0" y="0" width="${W}" height="${mid}"/></clipPath><clipPath id="jm-dn"><rect x="0" y="${mid}" width="${W}" height="${mid}"/></clipPath></defs>
+        <path d="${area}" fill="#3fb950" fill-opacity=".18" clip-path="url(#jm-up)"/>
+        <path d="${area}" fill="#f85149" fill-opacity=".18" clip-path="url(#jm-dn)"/>
+        <line x1="0" x2="${W}" y1="${mid}" y2="${mid}" stroke="#fff" stroke-opacity=".35" vector-effect="non-scaling-stroke"/>
+        <path d="${line}" fill="none" stroke="#3fb950" stroke-width="1.8" clip-path="url(#jm-up)" vector-effect="non-scaling-stroke"/>
+        <path d="${line}" fill="none" stroke="#f85149" stroke-width="1.8" clip-path="url(#jm-dn)" vector-effect="non-scaling-stroke"/>
+        <line class="jm-cursor" x1="0" x2="0" y1="0" y2="${H}" stroke="#fff" stroke-opacity="0" vector-effect="non-scaling-stroke"/>
+      </svg>
+    </div>
+    <div class="jm-sub" style="display:flex;justify-content:space-between;margin-top:4px" data-dates='${JSON.stringify(dates)}'><span>${dates[0]}</span><span>${dates[dates.length - 1]}</span></div>`
+}
+
+// Hover: Boost's own tooltip classes and day-tooltip layout, as the other cards use.
+const RULE = 'mt-1 border-t border-white/10 pt-1 '
+const trow = (l, v, cls = 'text-white', dd = cls) => `<dt class="${cls}">${l}</dt><dd class="text-right ${dd}">${v}</dd>`
+const sgn = v => (v < 0 ? '−' : '+') + kfmt(Math.abs(v))
+function pointTip(p) {
+  return `<div><p class="mb-1.5 font-semibold text-white">${esc(p.date)}</p><dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px] tabular-nums">`
+    + trow('listings withheld', kfmt(p.withheld)) + trow('skills injected', kfmt(p.injected))
+    + trow('net', sgn(p.net), RULE + 'text-white', p.net < 0 ? 'text-red-300' : 'text-emerald-300')
+    + trow('running net', sgn(p.run), 'text-white', p.run < 0 ? 'text-red-300/90' : 'text-emerald-300/90') + '</dl></div>'
+}
+function tipEl() {
+  let tip = document.getElementById(ID + '-tip')
+  if (!tip) {
+    tip = document.createElement('div')
+    tip.id = ID + '-tip'
+    tip.setAttribute('role', 'tooltip')
+    tip.className = 'report-meter-tooltip report-savings-tooltip report-meter-tooltip--fixed report-meter-tooltip--above'
+    tip.style.display = 'none'
+    document.body.appendChild(tip)
+  }
+  return tip
+}
+function hideTip() {
+  const tip = document.getElementById(ID + '-tip')
+  if (tip) tip.style.display = 'none'
+  document.querySelector(`#${ID} .jm-cursor`)?.setAttribute('stroke-opacity', '0')
+}
+function bindLine(el, pts) {
+  const svg = el.querySelector('.jm-line')
+  if (!svg) return
+  const W = svg.viewBox.baseVal.width, H = svg.viewBox.baseVal.height
+  const max = Math.max(...pts.map(p => Math.abs(p.net)), 1)
+  svg.addEventListener('pointermove', e => {
+    const box = svg.getBoundingClientRect()
+    const i = Math.max(0, Math.min(pts.length - 1, Math.round(((e.clientX - box.left) / box.width * W - 4) / (W - 8) * (pts.length - 1))))
+    const vx = 4 + (i / (pts.length - 1)) * (W - 8)
+    const cur = svg.querySelector('.jm-cursor')
+    cur.setAttribute('x1', vx); cur.setAttribute('x2', vx); cur.setAttribute('stroke-opacity', '.4')
+    const tip = tipEl()
+    tip.innerHTML = pointTip(pts[i])
+    tip.style.display = ''
+    const y = H / 2 - (pts[i].net / max) * (H / 2 - 6)
+    tip.style.left = `${box.left + (vx / W) * box.width}px`
+    tip.style.top = `${box.top + (Math.min(y, H / 2) / H) * box.height - 6}px`
+    const r = tip.getBoundingClientRect()
+    if (r.left < 8) tip.style.left = `${parseFloat(tip.style.left) + 8 - r.left}px`
+    else if (r.right > innerWidth - 8) tip.style.left = `${parseFloat(tip.style.left) - (r.right - innerWidth + 8)}px`
+  })
+  svg.addEventListener('pointerleave', hideTip)
+}
+
 function heading() {
   return `<h2 class="report-section-heading" style="color:var(--jm-accent)">Skill router</h2>`
 }
@@ -83,6 +181,7 @@ function body() {
       <span><b>${T.promptsWithoutSuggestion}</b>without one</span><span><b>${T.skillToolCalls}</b>Skill-tool calls</span>
       <span><b>${T.refusals}</b>refusals</span>
     </div>
+    ${lineChart(series())}
     <div class="jm-grid">
       <div>
         <h3>Top skills</h3>
@@ -115,6 +214,7 @@ function skeleton() {
       <div>${bar('260px', 12)}${bar('200px', 12, 'margin:6px 0 0 auto')}</div>
     </div>
     <div class="jm-stats">${[60, 80, 70, 90, 60].map(w => bar(`${w}px`, 12)).join('')}</div>
+    ${bar('100%', 150, 'margin-top:26px;border-radius:6px')}
     <div class="jm-grid">
       <div>${bar('90px', 11)}${rows(8)}${bar('100px', 11, 'margin-top:30px')}${rows(5)}</div>
       <div>${bar('100px', 11)}${Array.from({ length: 6 }, () => bar('75%', 12, 'margin-top:10px')).join('')}${bar('150px', 11, 'margin-top:30px')}${bar('90%', 12, 'margin-top:12px')}</div>
@@ -132,8 +232,10 @@ function render() {
   }
   el.removeAttribute('aria-busy')
   el.removeAttribute('aria-label')
+  hideTip()
   el.innerHTML = body()
   ops.bindSwitches(el, render)
+  if (data?.totals?.sessions) bindLine(el, series())
 }
 
 // Boost's Tokens Saved pane, loaded or still its own skeleton (which has no text, only an aria-label).

@@ -117,8 +117,9 @@ function summary(days) {
     b.agents++; b.cost += cost
     b.tokens += a.input + a.output + a.cache_read + a.cache_write_5m + a.cache_write_1h
     const d = (a.started || '').slice(0, 10)
-    if (!days_.has(d)) days_.set(d, { date: d, cost: blank(), agents: blank(), baseline: 0 })
-    const dd = days_.get(d); dd.cost[a.tier] += cost; dd.agents[a.tier]++; dd.baseline += a.baseline_usd ?? 0
+    if (!days_.has(d)) days_.set(d, { date: d, cost: blank(), base: blank(), agents: blank(), baseline: 0 })
+    // base[tier]: that tier's tokens at Opus prices, so base - cost is what routing to it saved (or lost) that day.
+    const dd = days_.get(d); dd.cost[a.tier] += cost; dd.base[a.tier] += a.baseline_usd ?? 0; dd.agents[a.tier]++; dd.baseline += a.baseline_usd ?? 0
     const rk = `${a.role}\u0000${a.lens || ''}\u0000${a.tier}`
     if (!roles.has(rk)) roles.set(rk, { role: a.role, lens: a.lens, tier: a.tier, agents: 0, cost: 0, output: 0 })
     const r = roles.get(rk); r.agents++; r.cost += cost; r.output += a.output
