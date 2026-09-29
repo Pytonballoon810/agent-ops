@@ -177,8 +177,10 @@ function summary(days) {
     const est = effortSaving(a, ref)
     if (est != null) { tot.effortSaved += est; tot.effortEstimated++; be.saved += est; dd.effort = (dd.effort || 0) + est }
     else if (a.effort && a.effort !== BASE_EFFORT) tot.effortUnestimated++
-    const rk = `${a.role}\u0000${a.lens || ''}\u0000${a.tier}\u0000${eff}`
-    if (!roles.has(rk)) roles.set(rk, { role: a.role, lens: a.lens, tier: a.tier, effort: a.effort, agents: 0, cost: 0, output: 0, effortSaved: 0 })
+    // One row per role, model, effort and workflow run: grouped across runs, the current run's agents
+    // disappear into months of history under the same role.
+    const rk = `${a.role}\u0000${a.lens || ''}\u0000${a.tier}\u0000${eff}\u0000${a.run_id || ''}`
+    if (!roles.has(rk)) roles.set(rk, { role: a.role, lens: a.lens, tier: a.tier, effort: a.effort, run: a.run_id, agents: 0, cost: 0, output: 0, effortSaved: 0 })
     const r = roles.get(rk); r.agents++; r.cost += cost; r.output += a.output; if (est != null) r.effortSaved += est
     if (!r.last || a.started > r.last) r.last = a.started
     const bare = a.model.replace(/-\d{8}$/, '')

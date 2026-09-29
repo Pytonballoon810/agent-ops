@@ -237,8 +237,12 @@ function render() {
   // Rule: what templates/route.js configures for this role, per lane where lanes differ. A row that ran on
   // a different model or effort is marked; a role with no rule inherits the session (Opus, xhigh).
   const ruleCell = r => {
-    const list = (data.rules || {})[r.role === 'review' && r.lens ? `review:${r.lens}` : r.role]
+    let list = (data.rules || {})[r.role === 'review' && r.lens ? `review:${r.lens}` : r.role]
     if (!list) return { html: '<span class="mr-sub">none</span>', match: null }
+    // A role's rule can differ by lane (fix: Opus high for code/ui/walk, Sonnet medium for docs), and the
+    // lane is not in the transcript. Show the lane rule that matches the model the agent ran on, if any.
+    const same = list.filter(x => x.model === r.tier)
+    if (same.length) list = same
     const html = list.map(x => `${pill(x.model)} ${x.effort ? epill(x.effort) : ''}${list.length > 1 ? `<span class="mr-sub"> ${esc(x.lanes.join('/'))}</span>` : ''}`).join('<br>')
     // full: model and effort as the rule says · model: the model follows it, the effort does not (yet) · off: neither
     const match = list.some(x => x.model === r.tier && (!x.effort || x.effort === r.effort)) ? 'full'
@@ -254,7 +258,7 @@ function render() {
     const rule = ruleCell(r)
     const off = MARK[rule.match] || ''
     const ago = r.last ? new Date(r.last).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
-    return `<tr${off}><td>${esc(r.role)}${r.lens ? `<span class="mr-sub">:${esc(r.lens)}</span>` : ''}</td><td class="mr-sub">${esc(ago)}</td><td>${pill(r.tier)} ${epill(r.effort)}</td><td>${rule.html}</td>
+    return `<tr${off}><td>${esc(r.role)}${r.lens ? `<span class="mr-sub">:${esc(r.lens)}</span>` : ''}${r.run ? `<br><span class="mr-sub" title="${esc(r.run)}">${esc(r.run.replace(/^wf_/, ''))}</span>` : ''}</td><td class="mr-sub">${esc(ago)}</td><td>${pill(r.tier)} ${epill(r.effort)}</td><td>${rule.html}</td>
     <td class="n">${r.agents}</td><td class="n">${usd(r.cost)}</td><td class="n">${usd(r.cost / r.agents)}</td></tr>`
   }).join('')
 
