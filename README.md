@@ -19,7 +19,17 @@ cards. It opens by itself whenever `boost ui` starts.
 
 `dashboard/server.mjs` proxies the running `boost ui` (port found from `boost.exe`'s listeners, or
 `BOOST_URL`) and injects scripts into the page; Boost's binary is never modified, so a Boost update
-cannot erase the cards. Two cards sit under Boost's *Tokens Saved*:
+cannot erase the cards. One pane sits above Boost's *Tokens Saved*:
+
+- **Agent usage** (`usage-panel.js`, data from `ingestUsage` in `ingest.mjs`) — every assistant message
+  in every transcript, as API-equivalent cost or tokens, one bar per day like Boost's chart. Colour is
+  the model; fill is the kind: chats solid, Agent-tool subagents started from a chat faded, Workflow
+  agents hatched (Boost's own "unused" style). The legend hides and shows series, as Boost's does.
+  Transcripts are read by byte offset, so only appended lines are parsed (first read of ~800 MB about
+  5 s, then well under a second); a message still streaming is left for the next pass, since only its
+  last line carries the final output count.
+
+Two cards sit under it:
 
 - **Model routing** (`panel.js`, data from `ingest.mjs`) — which model every subagent ran on, what it
   cost, and how its reviews held up. `ingest.mjs` reads `~/.claude/projects/*/*/subagents/**` into

@@ -11,7 +11,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync, execFile } from 'node:child_process'
-import { openDb, ingest } from './ingest.mjs'
+import { openDb, ingest, ingestUsage, tier } from './ingest.mjs'
 import { evaluate, windowed, lastSnapshot } from './jev.mjs'
 
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
@@ -53,6 +53,49 @@ async function discoverBoost() {
 
 function refresh() {
   if (Date.now() - lastIngest > 20_000) { ingest(db); lastIngest = Date.now() }
+}
+
+// The Agent usage pane: every assistant message of every transcript, bucketed like Boost's own chart —
+// one bar per local day from `days` days ago to today (Boost's /api/savings-timeline does the same: 7 days
+// is 8 bars, and 24 hours is yesterday and today) — and split by model tier and kind.
+let lastUsageIngest = 0
+const KINDS = ['chat', 'subagent', 'workflow']
+const pad2 = n => String(n).padStart(2, '0')
+const localDay = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+function usage(days) {
+  if (Date.now() - lastUsageIngest > 20_000) { ingestUsage(db); lastUsageIngest = Date.now() }
+  const hourly = false
+  const now = new Date()
+  let start
+  if (days > 0) { start = new Date(now); start.setHours(0, 0, 0, 0); start.setDate(start.getDate() - days) }
+  const since = start ? start.toISOString().slice(0, 13) : '0000'
+  const rows = db.prepare(`SELECT hour, model, kind, SUM(messages) messages, SUM(input) input, SUM(output) output,
+      SUM(cache_read) cache_read, SUM(cache_write_5m + cache_write_1h) cache_write, SUM(cost_usd) cost, SUM(unpriced) unpriced
+    FROM usage WHERE hour >= ? GROUP BY hour, model, kind`).all(since)
+  if (!start) start = rows.length ? new Date(rows.reduce((m, r) => r.hour < m ? r.hour : m, '9999') + ':00:00Z') : new Date(now)
+  if (!hourly) start.setHours(0, 0, 0, 0)
+
+  // Every bucket from start to now, empty ones included, as Boost's chart does.
+  const keyOf = d => hourly ? `${localDay(d)}T${pad2(d.getHours())}` : localDay(d)
+  const buckets = new Map()
+  for (const d = new Date(start); d <= now; hourly ? d.setHours(d.getHours() + 1) : d.setDate(d.getDate() + 1)) {
+    buckets.set(keyOf(d), { key: keyOf(d), cells: {} })
+  }
+  const blank = () => ({ tokens: 0, cost: 0, messages: 0 })
+  const totals = { tokens: 0, cost: 0, messages: 0, unpriced: 0, input: 0, output: 0, cache_read: 0, cache_write: 0, byTier: {}, byKind: {} }
+  for (const k of KINDS) totals.byKind[k] = blank()
+  for (const r of rows) {
+    const b = buckets.get(keyOf(new Date(r.hour + ':00:00Z')))
+    if (!b) continue
+    const t = tier(r.model), tokens = r.input + r.output + r.cache_read + r.cache_write
+    const cell = (b.cells[t] ||= {})[r.kind] ||= blank()
+    cell.tokens += tokens; cell.cost += r.cost; cell.messages += r.messages
+    totals.tokens += tokens; totals.cost += r.cost; totals.messages += r.messages; totals.unpriced += r.unpriced
+    for (const f of ['input', 'output', 'cache_read', 'cache_write']) totals[f] += r[f]
+    const bt = totals.byTier[t] ||= blank(); bt.tokens += tokens; bt.cost += r.cost; bt.messages += r.messages
+    const bk = totals.byKind[r.kind]; bk.tokens += tokens; bk.cost += r.cost; bk.messages += r.messages
+  }
+  return { days, hourly, generated: now.toISOString(), totals, buckets: [...buckets.values()] }
 }
 
 function summary(days) {
@@ -144,7 +187,7 @@ async function proxy(req, res) {
     // period.js first and classic, so it wraps fetch before Boost's own modules make their first request.
     const head = '<script src="/__routing/period.js"></script>'
     html = /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, m => m + head) : head + html
-    const tags = '<script type="module" src="/__routing/panel.js"></script><script type="module" src="/__routing/jev-panel.js"></script>'
+    const tags = '<script type="module" src="/__routing/usage-panel.js"></script><script type="module" src="/__routing/panel.js"></script><script type="module" src="/__routing/jev-panel.js"></script>'
     buf = Buffer.from(html.includes('</body>') ? html.replace('</body>', tags + '</body>') : html + tags)
   }
   res.writeHead(up.status, out)
@@ -197,7 +240,12 @@ async function watchBoost() {
 http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url, 'http://x')
-    if (['/__routing/panel.js', '/__routing/period.js', '/__routing/jev-panel.js'].includes(u.pathname)) {
+    if (u.pathname === '/__routing/api/usage') {
+      const days = Math.max(0, Number(u.searchParams.get('days') ?? 30) || 0)
+      res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      return res.end(JSON.stringify(usage(days)))
+    }
+    if (['/__routing/panel.js', '/__routing/period.js', '/__routing/jev-panel.js', '/__routing/usage-panel.js'].includes(u.pathname)) {
       res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-store' })
       return res.end(fs.readFileSync(path.join(HERE, path.basename(u.pathname))))
     }

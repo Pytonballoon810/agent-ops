@@ -107,8 +107,146 @@ export function openDb(file = DB_PATH) {
       PRIMARY KEY (agent_id, lens, outcome)
     );
     CREATE INDEX IF NOT EXISTS agents_started ON agents(started);
+    -- Overall usage, for the Agent usage pane: every assistant message in every transcript, summed per
+    -- UTC hour, model and kind (chat = a session you typed in, subagent = an Agent-tool agent started
+    -- from a chat, workflow = an agent of a Workflow run). Read by byte offset: transcripts only grow.
+    CREATE TABLE IF NOT EXISTS usage_files (path TEXT PRIMARY KEY, offset INTEGER, last_msg TEXT);
+    CREATE TABLE IF NOT EXISTS usage (
+      path TEXT, hour TEXT, model TEXT, kind TEXT, messages INTEGER,
+      input INTEGER, output INTEGER, cache_read INTEGER, cache_write_5m INTEGER, cache_write_1h INTEGER,
+      cost_usd REAL, unpriced INTEGER,
+      PRIMARY KEY (path, hour, model, kind)
+    );
+    CREATE INDEX IF NOT EXISTS usage_hour ON usage(hour);
   `)
   return db
+}
+
+// Every transcript with its kind: <project>/<session>.jsonl is a chat; under <session>/subagents/,
+// workflows/wf_*/ holds workflow agents and anything else is an Agent-tool subagent.
+function* usageCandidates() {
+  let projects
+  try { projects = fs.readdirSync(PROJECTS, { withFileTypes: true }) } catch { return }
+  for (const proj of projects) {
+    if (!proj.isDirectory()) continue
+    const pdir = path.join(PROJECTS, proj.name)
+    let ents
+    try { ents = fs.readdirSync(pdir, { withFileTypes: true }) } catch { continue }
+    for (const e of ents) {
+      if (e.isFile() && e.name.endsWith('.jsonl')) yield { file: path.join(pdir, e.name), kind: 'chat' }
+      else if (e.isDirectory()) {
+        const sub = path.join(pdir, e.name, 'subagents')
+        if (!fs.existsSync(sub)) continue
+        for (const f of walk(sub)) {
+          const b = path.basename(f)
+          if (b.startsWith('agent-') && b.endsWith('.jsonl')) {
+            yield { file: f, kind: /[\\/]workflows[\\/]wf_[^\\/]+[\\/]agent-[^\\/]+$/.test(f) ? 'workflow' : 'subagent' }
+          }
+        }
+      }
+    }
+  }
+}
+
+// Reads what was appended to one transcript since the stored offset, in 16 MB slices, whole lines only.
+// A file that shrank was rewritten, so its rows are dropped and it is read again from the start.
+//
+// A message streams in as several consecutive lines with the same id, and only the last carries its final
+// output count, so each message is held until a different id follows. The last message read is not
+// counted yet — the offset is left at its first line so the next pass reads it whole — unless the file
+// has been quiet for two minutes, when it is finished and counted.
+function ingestUsageFile(db, file, kind, size, mtimeMs, st) {
+  let row = st.get.get(file)
+  if (row && size < row.offset) { st.del.run(file); row = null }
+  let offset = row?.offset ?? 0, last = row?.last_msg ?? null
+  if (offset === size) return false
+  const acc = new Map()
+  let pending = null
+  const commit = p => {
+    let a = acc.get(p.key)
+    if (!a) acc.set(p.key, a = { messages: 0, input: 0, output: 0, cache_read: 0, cache_write_5m: 0, cache_write_1h: 0, cost: 0, unpriced: 0 })
+    a.messages++
+    for (const f in p.x) a[f] += p.x[f]
+    const c = costOf(p.x, p.model)
+    if (c == null) a.unpriced++; else a.cost += c
+    last = p.id
+  }
+  const fd = fs.openSync(file, 'r')
+  try {
+    // Split on the newline byte, not on decoded text, so a slice ending inside a multi-byte character
+    // cannot shift the stored offset.
+    let carry = Buffer.alloc(0)
+    const buf = Buffer.alloc(16 * 1024 * 1024)
+    let pos = offset
+    while (pos < size) {
+      const n = fs.readSync(fd, buf, 0, Math.min(buf.length, size - pos), pos)
+      if (!n) break
+      pos += n
+      const chunk = carry.length ? Buffer.concat([carry, buf.subarray(0, n)]) : buf.subarray(0, n)
+      const cut = chunk.lastIndexOf(10)
+      if (cut < 0) { carry = Buffer.from(chunk); continue }
+      carry = Buffer.from(chunk.subarray(cut + 1))
+      const base = pos - chunk.length   // file offset of chunk[0]
+      offset = pos - carry.length
+      for (let s = 0; s < cut;) {
+        const e = chunk.indexOf(10, s)
+        const lineStart = base + s
+        const line = chunk.toString('utf8', s, e)
+        s = e + 1
+        if (!line.includes('"type":"assistant"') || !line.includes('"usage"')) continue
+        let o
+        try { o = JSON.parse(line) } catch { continue }
+        const m = o.message
+        if (!m?.usage || !m.model || m.model === '<synthetic>' || !o.timestamp) continue
+        const id = m.id || o.uuid
+        if (id === last) continue
+        const u = m.usage, w = u.cache_creation || {}
+        const w1h = w.ephemeral_1h_input_tokens ?? 0
+        const x = { input: u.input_tokens || 0, output: u.output_tokens || 0, cache_read: u.cache_read_input_tokens || 0,
+          cache_write_5m: w.ephemeral_5m_input_tokens ?? Math.max(0, (u.cache_creation_input_tokens || 0) - w1h), cache_write_1h: w1h }
+        if (pending?.id === id) { pending.x = x; continue }   // a later line of the same message: final counts win
+        if (pending) commit(pending)
+        // Older versions kept Agent-tool subagents inside the chat's own file, marked as a sidechain.
+        const k = kind === 'chat' && o.isSidechain ? 'subagent' : kind
+        pending = { id, x, model: m.model, key: `${o.timestamp.slice(0, 13)}\u0000${m.model}\u0000${k}`, start: lineStart }
+      }
+    }
+  } finally { fs.closeSync(fd) }
+  if (pending) {
+    if (Date.now() - mtimeMs > 120_000) commit(pending)
+    else offset = pending.start
+  }
+  for (const [key, a] of acc) {
+    const [hour, model, k] = key.split('\u0000')
+    st.add.run(file, hour, model, k, a.messages, a.input, a.output, a.cache_read, a.cache_write_5m, a.cache_write_1h, a.cost, a.unpriced)
+  }
+  st.mark.run(file, offset, last)
+  return true
+}
+
+export function ingestUsage(db = openDb(), { rebuild = false } = {}) {
+  if (rebuild) db.exec(`DELETE FROM usage_files; DELETE FROM usage;`)
+  const st = {
+    get: db.prepare(`SELECT offset, last_msg FROM usage_files WHERE path = ?`),
+    del: db.prepare(`DELETE FROM usage WHERE path = ?`),
+    mark: db.prepare(`INSERT OR REPLACE INTO usage_files VALUES (?,?,?)`),
+    add: db.prepare(`INSERT INTO usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT (path, hour, model, kind) DO UPDATE SET messages = messages + excluded.messages,
+        input = input + excluded.input, output = output + excluded.output, cache_read = cache_read + excluded.cache_read,
+        cache_write_5m = cache_write_5m + excluded.cache_write_5m, cache_write_1h = cache_write_1h + excluded.cache_write_1h,
+        cost_usd = cost_usd + excluded.cost_usd, unpriced = unpriced + excluded.unpriced`),
+  }
+  let files = 0
+  db.exec('BEGIN')
+  try {
+    for (const { file, kind } of usageCandidates()) {
+      let s
+      try { s = fs.statSync(file) } catch { continue }
+      if (ingestUsageFile(db, file, kind, s.size, s.mtimeMs, st)) files++
+    }
+    db.exec('COMMIT')
+  } catch (e) { db.exec('ROLLBACK'); throw e }
+  return { files }
 }
 
 function* walk(dir, depth = 0) {
@@ -278,6 +416,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(im
   const db = openDb()
   const t0 = performance.now()
   const r = ingest(db, { rebuild: process.argv.includes('--rebuild') })
+  const u = ingestUsage(db, { rebuild: process.argv.includes('--rebuild') })
+  console.log(`usage: read new lines from ${u.files} transcripts`)
   const s = db.prepare(`SELECT tier, COUNT(*) n, SUM(cost_usd) cost, SUM(baseline_usd) base FROM agents GROUP BY tier`).all()
   console.log(`ingested ${r.agents} agent transcripts and ${r.journals} journals in ${Math.round(performance.now() - t0)} ms`)
   for (const x of s) console.log(`  ${x.tier.padEnd(7)} ${String(x.n).padStart(5)} agents  $${(x.cost ?? 0).toFixed(2)}  (at Opus prices $${(x.base ?? 0).toFixed(2)})`)
