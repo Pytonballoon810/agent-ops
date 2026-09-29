@@ -233,6 +233,7 @@ function tokensPane() {
 const paneClass = a => a.className.split(/\s+/).filter(c => c && c !== 'animate-pulse').join(' ')
 
 function ensureMounted() {
+  if (!window.__agentOps.guard(ID)) return null
   let el = document.getElementById(ID)
   const anchor = tokensPane()
   if (el && el.isConnected) {
@@ -274,6 +275,7 @@ async function load(skeleton = false) {
 }
 
 window.addEventListener('boost-period', e => { days = e.detail.days; load(true) })
+window.addEventListener('agent-ops-route', render)
 new MutationObserver(() => { if (!document.getElementById(ID)) render() })
   .observe(document.body, { childList: true, subtree: true })
 

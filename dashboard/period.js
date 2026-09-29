@@ -31,7 +31,28 @@
 
 // Shared by the cards: feature switches in Boost's own switch markup, and live refresh that never
 // redraws under the pointer.
+// Our panes belong on Boost's report root only. Boost's sub-pages (/sessions/…, /settings, /filters, …)
+// are client-side routes: pushState plus a popstate event, no reload, and React leaves nodes it does not
+// own in place, so each pane checks onRoot() when mounting and removes itself on `agent-ops-route`.
+// (The leading semicolon matters: without it this IIFE would be parsed as a call on the one above.)
+;(() => {
+  const fire = () => window.dispatchEvent(new Event('agent-ops-route'))
+  for (const m of ['pushState', 'replaceState']) {
+    const orig = history[m]
+    history[m] = function () { const r = orig.apply(this, arguments); fire(); return r }
+  }
+  window.addEventListener('popstate', fire)
+})()
+
 window.__agentOps ||= {
+  onRoot: () => location.pathname === '/',
+  // Remove a pane and its tooltip when the page is not the root; returns whether it may be shown.
+  guard(id) {
+    if (this.onRoot()) return true
+    document.getElementById(id)?.remove()
+    document.getElementById(id + '-tip')?.remove()
+    return false
+  },
   toggles: null,
   POLL_MS: 10_000,
   async refreshToggles() {

@@ -287,6 +287,7 @@ function tokensPane() {
 const paneClass = anchor => anchor.className.split(/\s+/).filter(c => c && c !== 'animate-pulse').join(' ')
 
 function ensureMounted() {
+  if (!ops.guard(ID)) return null
   let el = document.getElementById(ID)
   const anchor = tokensPane()
   if (el && el.isConnected) {
@@ -332,6 +333,7 @@ async function load(skeleton = false) {
 
 window.addEventListener('boost-period', e => { days = e.detail.days; load(true) })
 window.addEventListener('agent-ops-toggles', () => ops.whenIdle(document.getElementById(ID), render))
+window.addEventListener('agent-ops-route', render)
 
 // Mount as soon as Boost's Tokens Saved pane exists (showing the skeleton until data arrives), and put the
 // card back when React re-renders the page and drops a node it does not own.
