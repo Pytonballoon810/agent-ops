@@ -327,7 +327,7 @@ function render() {
 // Boost's Tokens Saved pane, loaded or still its own skeleton (which has no text, only an aria-label).
 function tokensPane() {
   const main = document.querySelector('main')
-  return main && [...main.querySelectorAll(':scope > section')].find(s => /Tokens Saved/i.test(s.textContent || '') || /tokens saved/i.test(s.getAttribute('aria-label') || ''))
+  return ops.tokensPane()
 }
 // Look like Boost's pane, but never inherit its skeleton's pulse: the card pulses on its own aria-busy.
 const paneClass = anchor => anchor.className.split(/\s+/).filter(c => c && c !== 'animate-pulse').join(' ')

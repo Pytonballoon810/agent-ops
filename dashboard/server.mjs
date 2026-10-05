@@ -44,15 +44,23 @@ async function discoverBoost() {
       .map(l => l.trim().split(/\s+/))
       .filter(c => c[3] === 'LISTENING' && pids.has(c[4]) && c[1].startsWith('127.0.0.1:'))
       .map(c => c[1].split(':')[1])
+    const listeners = execFileSync('netstat', ['-ano', '-p', 'tcp'], { encoding: 'utf8' }).split('\n')
+      .map(l => l.trim().split(/\s+/))
+      .filter(c => c[3] === 'LISTENING' && pids.has(c[4]) && c[1].startsWith('127.0.0.1:'))
     for (const port of ports) {
       try {
-        const r = await fetch(`http://127.0.0.1:${port}/api/feature-flags`, { signal: AbortSignal.timeout(800) })
-        if (r.ok) return `http://127.0.0.1:${port}`
+        // Any answer at all means a Boost dashboard: newer versions need not keep /api/feature-flags.
+        const r = await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(2500) })
+        if (r.ok && /boost/i.test(await r.text())) {
+          boostPid = listeners.find(c => c[1] === `127.0.0.1:${port}`)?.[4] || null
+          return `http://127.0.0.1:${port}`
+        }
       } catch {}
     }
   } catch {}
   return null
 }
+let boostPid = null
 
 function refresh() {
   if (Date.now() - lastIngest > 8_000) { ingest(db); lastIngest = Date.now() }
@@ -274,9 +282,14 @@ async function jevSnapshot(u) {
 }
 
 // Start with Boost: `boost ui` is started by hand and takes a new port each time. Poll for it, and
-// when a Boost dashboard appears on a port not seen before, open this page once. Whatever is
-// already running when this server starts (at logon, or a restart) is adopted without opening.
-let watchedPort = undefined
+// when a NEW `boost ui` process appears, open this page once. Whatever is already running when this
+// server starts (at logon, or a restart) is adopted without opening.
+//
+// A process, not a port: one check can miss a running Boost (slow to answer, netstat hiccup), and
+// keying on "port seen again after a miss" reopened the page 26 times for one boost ui. So a Boost is
+// only forgotten after 3 misses in a row (15 s), and a page opens only for a process id not seen before.
+let watchedPort = undefined, misses = 0
+const seenPids = new Set()
 // The task runs hidden, so stdout goes nowhere; Boost comings and goings are kept in server.log.
 function log(line) {
   const stamped = `${new Date().toISOString()}  ${line}\n`
@@ -290,13 +303,25 @@ function log(line) {
 async function watchBoost() {
   const url = process.env.BOOST_URL ? null : await discoverBoost()
   const port = url ? new URL(url).port : null
-  if (port !== watchedPort) {
+  if (!port) {
+    if (watchedPort && ++misses < 3) return   // probably a missed check, not a stopped Boost
+    if (watchedPort !== null) log('boost ui is not running')
+    watchedPort = null; misses = 0
+    if (!process.env.BOOST_URL) boostUrl = null
+    return
+  }
+  misses = 0
+  const pid = boostPid
+  const first = watchedPort === undefined
+  const fresh = pid && !seenPids.has(pid)
+  if (pid) seenPids.add(pid)
+  if (port !== watchedPort || fresh) {
     if (!process.env.BOOST_URL) boostUrl = url
-    if (port && watchedPort !== undefined && !process.env.ROUTING_NO_OPEN) {
+    if (!first && fresh && !process.env.ROUTING_NO_OPEN) {
       execFile('rundll32', ['url.dll,FileProtocolHandler', `http://127.0.0.1:${PORT}/`], () => {})
-      log(`boost ui appeared on ${port}; opened the combined page`)
+      log(`new boost ui (pid ${pid}) on ${port}; opened the combined page`)
     } else {
-      log(port ? `adopted boost ui on ${port}` : 'boost ui is not running')
+      log(`${first ? 'adopted' : 'found again'} boost ui (pid ${pid}) on ${port}`)
     }
     watchedPort = port
   }

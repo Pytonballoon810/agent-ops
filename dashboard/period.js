@@ -46,6 +46,17 @@
 
 window.__agentOps ||= {
   onRoot: () => location.pathname === '/',
+  // Boost's Tokens Saved pane, loaded or still its skeleton, at any depth: Boost 0.14 wraps its panes in
+  // an extra <div>, so it is no longer a direct child of <main>. Found by its own heading text (or the
+  // skeleton's aria-label), never by loose text, which our skill-router card would match too.
+  tokensPane() {
+    const main = document.querySelector('main')
+    if (!main) return null
+    const h = [...main.querySelectorAll('h2')].find(e => /^\s*Tokens Saved\s*$/i.test(e.textContent || ''))
+    const pane = h?.closest('section')
+      || [...main.querySelectorAll('section[aria-label]')].find(s => /tokens saved/i.test(s.getAttribute('aria-label')))
+    return pane && !['agent-usage', 'model-routing', 'jev-meter'].includes(pane.id) ? pane : null
+  },
   // Remove a pane and its tooltip when the page is not the root; returns whether it may be shown.
   guard(id) {
     if (this.onRoot()) return true

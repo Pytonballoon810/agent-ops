@@ -241,7 +241,7 @@ function bind(el) {
 // Boost's Tokens Saved pane, loaded or still its own skeleton (which has no text, only an aria-label).
 function tokensPane() {
   const main = document.querySelector('main')
-  return main && [...main.querySelectorAll(':scope > section')].find(s => /Tokens Saved/i.test(s.textContent || '') || /tokens saved/i.test(s.getAttribute('aria-label') || ''))
+  return window.__agentOps.tokensPane()
 }
 const paneClass = a => a.className.split(/\s+/).filter(c => c && c !== 'animate-pulse').join(' ')
 
