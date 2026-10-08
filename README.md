@@ -243,7 +243,6 @@ agent-ops/
 │   └── global-pointer.md    template for ~/.claude/rules/model-routing.md (filled in by the switch)
 ├── templates/route.js       the ROUTES table and route() to paste into a workflow script
 ├── dashboard/               the server and the injected panes (no dependencies)
-├── docs/spec-jev-card.md    the spec the skill-router card, period following and autostart were built from
 ├── install.ps1              register the logon task
 └── uninstall.ps1            remove it
 ```
