@@ -13,10 +13,11 @@ import path from 'node:path'
 import { execFileSync, execFile } from 'node:child_process'
 import { openDb, ingest, ingestUsage, tier, priceFor } from './ingest.mjs'
 import os from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { evaluate, windowed, lastSnapshot } from './jev.mjs'
 import { readToggles, setToggle } from './toggles.mjs'
 
-const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))
+const HERE = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.ROUTING_PORT || 56300)
 // The skill-router card's numbers: jev.mjs re-reads changed transcripts on a timer (incremental, cached
 // in data/), and a period is a filter over its last parse, so a request never waits on a full scan.

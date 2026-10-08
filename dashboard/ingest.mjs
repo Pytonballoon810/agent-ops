@@ -8,11 +8,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 
 const HOME = os.homedir()
 export const PROJECTS = path.join(HOME, '.claude', 'projects')
-export const DB_PATH = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), 'routing.db')
+export const DB_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), 'routing.db')
 const PRICES_PATH = path.join(process.env.LOCALAPPDATA || path.join(HOME, 'AppData', 'Local'), 'boost', 'litellm-prices.json')
 
 // What every row is priced against to say what routing saved: the same tokens at Opus rates.
@@ -435,7 +436,7 @@ export function ingest(db = openDb(), { rebuild = false } = {}) {
   return { agents, journals }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'))) {
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
   const db = openDb()
   const t0 = performance.now()
   const r = ingest(db, { rebuild: process.argv.includes('--rebuild') })
